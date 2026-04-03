@@ -1,0 +1,106 @@
+# =============================================================================
+# fusion-index — Helm Values (production defaults)
+# =============================================================================
+
+# Kubernetes namespace — must match the fusion platform namespace
+namespace: fusion
+
+# Set to false if the namespace already exists (e.g. fusion-spectra installed it first)
+createNamespace: true
+
+# -----------------------------------------------------------------------------
+# Backend — Quarkus REST service (port 8080)
+# -----------------------------------------------------------------------------
+backend:
+  image:
+    repository: fusion-index
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  # Internal Kubernetes Service name for the backend
+  serviceName: index-backend
+
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+  # storageBackend: S3 | FILESYSTEM — defaults to S3 in production
+  storageBackend: S3
+
+  javaOpts: "-Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+
+# -----------------------------------------------------------------------------
+# PostgreSQL — Bitnami subchart (bundled) or external
+#
+# Bundled (default):  postgresql.enabled: true
+# External:           postgresql.enabled: false  +  postgresql.external.*
+# -----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+
+  auth:
+    database: fusion_index
+    username: fusion
+    password: "changeme"   # override in production — or use existingSecret
+    existingSecret: ""     # if set, password above is ignored; secret must have key 'password'
+
+  primary:
+    persistence:
+      enabled: true
+      size: 8Gi
+
+  # External PostgreSQL settings — only used when enabled: false
+  external:
+    host: ""
+    port: 5432
+    database: fusion_index
+    username: fusion
+    existingSecret: ""     # must contain key 'password'
+    password: ""           # fallback — prefer existingSecret in production
+
+# -----------------------------------------------------------------------------
+# S3 artifact storage — external only
+#
+# credentialsType:
+#   static  — provide accessKeyId + secretAccessKey (or existingSecret)
+#   default — use IRSA / Workload Identity / instance profile (no secret needed)
+# -----------------------------------------------------------------------------
+s3:
+  bucket: fusion-index-artifacts
+  region: us-east-1
+  endpointOverride: ""     # set for MinIO, Ceph, or custom S3-compatible endpoints
+
+  credentialsType: static
+
+  # Provide an existing secret with keys: aws-access-key-id, aws-secret-access-key
+  existingSecret: ""
+
+  # Used only when existingSecret is empty and credentialsType is static
+  # Do NOT commit real credentials here — inject via --set or a separate values file
+  accessKeyId: ""
+  secretAccessKey: ""
+
+# -----------------------------------------------------------------------------
+# Ingress
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: index.fusion.local
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: "100m"  # for large artifact uploads
+  tls:
+    enabled: false
+    secretName: fusion-index-tls

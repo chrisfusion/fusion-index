@@ -1,0 +1,16 @@
+.DS_Store
+.git
+.gitignore
+*.tmp
+*.bak
+
+# Credentials & certificates — never pack into a chart tarball
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+.env
+.env.*
+values-*.yaml

@@ -1,0 +1,36 @@
+# =============================================================================
+# fusion-index — Dev overrides for minikube
+#
+# Usage:
+#   helm upgrade --install fusion-index ./deployment \
+#     -f ./deployment/values-dev.yaml
+#
+# Prerequisites:
+#   minikube addons enable ingress
+#   echo "$(minikube ip)  index.fusion.local" | sudo tee -a /etc/hosts
+#   eval $(minikube docker-env)
+#   docker build -t fusion-index:latest .
+# =============================================================================
+
+# The fusion namespace is created by fusion-spectra; don't recreate it
+createNamespace: false
+
+backend:
+  image:
+    pullPolicy: Never   # image loaded directly into minikube — no registry pull
+    tag: latest
+  storageBackend: FILESYSTEM   # no S3 in local dev
+
+postgresql:
+  image:
+    tag: latest         # Bitnami removes pinned tags; use latest for dev
+  auth:
+    password: "devpass"
+  primary:
+    persistence:
+      enabled: false    # no PVC needed in dev
+
+# s3 block intentionally omitted — storageBackend=FILESYSTEM skips all S3 wiring
+
+ingress:
+  host: index.fusion.local   # requires /etc/hosts entry: <minikube-ip> index.fusion.local

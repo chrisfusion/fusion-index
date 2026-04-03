@@ -1,0 +1,17 @@
+apiVersion: v2
+name: fusion-index
+description: Fusion Index — Job Registry (Quarkus backend + Vue.js Module Federation remote)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - fusion
+  - job-registry
+  - quarkus
+
+dependencies:
+  - name: postgresql
+    version: "~16.0"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled

@@ -1,0 +1,39 @@
+fusion-index has been deployed.
+
+  Release:   {{ .Release.Name }}
+  Namespace: {{ .Values.namespace }}
+
+Services:
+  Backend API:  http://{{ include "fusion-index.backendServiceName" . }}.{{ .Values.namespace }}.svc.cluster.local:8080
+
+
+{{- if .Values.ingress.enabled }}
+
+Ingress:
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+
+  If using minikube, add the following to /etc/hosts:
+    $(minikube ip)  {{ .Values.ingress.host }}
+{{- end }}
+
+API docs (once backend is running):
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/swagger-ui/
+
+{{- if .Values.postgresql.enabled }}
+
+PostgreSQL:
+  Host: {{ include "fusion-index.dbHost" . }}
+  DB:   {{ include "fusion-index.dbName" . }}
+  User: {{ include "fusion-index.dbUsername" . }}
+{{- else }}
+
+PostgreSQL (external):
+  Host: {{ .Values.postgresql.external.host }}:{{ .Values.postgresql.external.port }}
+{{- end }}
+
+S3 artifact storage:
+  Bucket:   {{ .Values.s3.bucket }}
+  Region:   {{ .Values.s3.region }}
+{{- if .Values.s3.endpointOverride }}
+  Endpoint: {{ .Values.s3.endpointOverride }}
+{{- end }}

@@ -1,0 +1,41 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+.mvn/wrapper/maven-wrapper.jar
+
+# Quarkus local config overrides (may contain credentials)
+src/main/resources/application-local.properties
+src/main/resources/application-local.yaml
+src/main/resources/application-dev.properties
+src/main/resources/application-dev.yaml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+# Emacs
+*~
+\#*\#
+.\#*
+# Vim
+*.swp
+*.swo
+
+# Credentials & certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Helm — keep Chart.lock, ignore downloaded tarballs
+deployment/charts/*.tgz
+
+# Common
+.env
+.env.*
+*.log
+.DS_Store
