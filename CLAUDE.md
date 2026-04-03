@@ -35,6 +35,7 @@ src/
 | GET/POST | `/api/v1/jobs/{id}/versions` | List / publish job version |
 | GET | `/api/v1/jobs/{id}/versions/{n}` | Get specific job version |
 | GET/POST | `/api/v1/jobs/{jobId}/versions/{n}/artifacts` | List / upload artifact |
+| GET | `/api/v1/artifacts` | List all artifacts (paginated, sorted by createdAt DESC) |
 | GET/DELETE | `/api/v1/artifacts/{id}` | Get metadata / delete artifact |
 | GET | `/api/v1/artifacts/{id}/download` | Download artifact stream |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
@@ -78,7 +79,10 @@ though the endpoint appears in the OpenAPI spec.
 
 Artifact endpoints are split across two classes for this reason:
 - `ArtifactResource` → `@Path("/api/v1/jobs")` — list + upload (under job version path)
-- `ArtifactByIdResource` → `@Path("/api/v1/artifacts")` — get / download / delete
+- `ArtifactByIdResource` → `@Path("/api/v1/artifacts")` — list all (paginated) / get / download / delete
+
+### Pagination pattern for list endpoints
+All paginated `list()` resource methods are annotated `@Transactional` so that `listAll` and `countAll` share a single transaction — keeping `total` consistent with the returned page. `page` is validated with `@Min(0)` and `pageSize` with `@Min(1)`; invalid values return 400.
 
 ## Branch Strategy
 `main` → `develop` → `feature/*`

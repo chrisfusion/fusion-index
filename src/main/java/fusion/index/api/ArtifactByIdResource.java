@@ -1,10 +1,13 @@
 package fusion.index.api;
 
 import fusion.index.api.dto.ArtifactResponse;
+import fusion.index.api.dto.PageResponse;
 import fusion.index.api.mapper.ArtifactMapper;
 import fusion.index.registry.entity.Artifact;
 import fusion.index.registry.service.ArtifactService;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
+import jakarta.validation.constraints.Min;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -13,6 +16,8 @@ import org.eclipse.microprofile.openapi.annotations.Operation;
 import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 
 import java.io.InputStream;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Path("/api/v1/artifacts")
 @Tag(name = "Artifacts")
@@ -21,6 +26,18 @@ public class ArtifactByIdResource {
 
     @Inject ArtifactService artifactService;
     @Inject ArtifactMapper  mapper;
+
+    @GET
+    @Transactional
+    @Operation(summary = "List all artifacts")
+    public PageResponse<ArtifactResponse> list(
+            @QueryParam("page")     @DefaultValue("0")  @Min(0) int page,
+            @QueryParam("pageSize") @DefaultValue("20") @Min(1) int pageSize) {
+        List<ArtifactResponse> items = artifactService.listAll(page, pageSize).stream()
+            .map(mapper::toResponse)
+            .collect(Collectors.toList());
+        return new PageResponse<>(items, artifactService.countAll(), page, pageSize);
+    }
 
     @GET
     @Path("/{id}")

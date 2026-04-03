@@ -4,7 +4,9 @@ import fusion.index.api.dto.*;
 import fusion.index.api.mapper.JobMapper;
 import fusion.index.registry.service.JobService;
 import jakarta.inject.Inject;
+import jakarta.transaction.Transactional;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -24,10 +26,11 @@ public class JobResource {
     @Inject JobMapper  mapper;
 
     @GET
+    @Transactional
     @Operation(summary = "List jobs")
     public PageResponse<JobResponse> list(
-            @QueryParam("page")     @DefaultValue("0")  int page,
-            @QueryParam("pageSize") @DefaultValue("20") int pageSize) {
+            @QueryParam("page")     @DefaultValue("0")  @Min(0) int page,
+            @QueryParam("pageSize") @DefaultValue("20") @Min(1) int pageSize) {
         List<JobResponse> items = jobService.listAll(page, pageSize).stream()
             .map(mapper::toResponse)
             .collect(Collectors.toList());

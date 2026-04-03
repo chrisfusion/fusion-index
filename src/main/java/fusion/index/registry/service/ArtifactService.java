@@ -95,6 +95,16 @@ public class ArtifactService {
             .orElseThrow(() -> new NotFoundException("Artifact not found: " + id));
     }
 
+    public List<Artifact> listAll(int page, int pageSize) {
+        return Artifact.findAll(io.quarkus.panache.common.Sort.by("createdAt").descending())
+            .page(page, pageSize)
+            .list();
+    }
+
+    public long countAll() {
+        return Artifact.count();
+    }
+
     public List<Artifact> listForJobVersion(long jobId, int versionNumber) {
         JobVersion jobVersion = jobService.findVersion(jobId, versionNumber);
         return Artifact.find("jobVersion.id", jobVersion.id).list();
