@@ -56,6 +56,7 @@ helm upgrade --install fusion-index deployment/ \
 - After rebuilding the image: `kubectl rollout restart deployment/index-backend -n fusion`
 - `eval $(minikube docker-env)` only affects the current shell — re-run in every new terminal before `docker build`
 - Port-forward requires `--address 127.0.0.1` or it fails silently: `kubectl port-forward -n fusion service/index-backend 18080:8080 --address 127.0.0.1`
+- Smoke-test once port-forward is running: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
 
 ## Local Testing (no cluster needed)
 
