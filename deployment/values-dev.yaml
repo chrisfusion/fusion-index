@@ -20,6 +20,7 @@ backend:
     pullPolicy: Never   # image loaded directly into minikube — no registry pull
     tag: latest
   storageBackend: FILESYSTEM   # no S3 in local dev
+  ginMode: debug
 
 postgresql:
   image:

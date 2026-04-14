@@ -1,15 +1,26 @@
-# Java / Maven
-target/
-*.class
-*.jar
-*.war
-.mvn/wrapper/maven-wrapper.jar
+# Go build artifacts
+fusion-index
+/bin/
+/dist/
 
-# Quarkus local config overrides (may contain credentials)
-src/main/resources/application-local.properties
-src/main/resources/application-local.yaml
-src/main/resources/application-dev.properties
-src/main/resources/application-dev.yaml
+# Go modules download cache (local vendor alternative)
+/vendor/
+
+# Go test cache and coverage
+*.test
+*.out
+coverage.html
+coverage.txt
+*.prof
+*.trace
+
+# Go workspace files
+go.work
+go.work.sum
+
+# CGo intermediates
+*.a
+*.so
 
 # IDE
 .idea/

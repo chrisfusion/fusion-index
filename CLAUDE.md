@@ -3,24 +3,45 @@
 Stores, indexes, and exposes Fusion job definitions via REST API.
 
 ## Tech Stack
-- **Language:** Java 21
-- **Framework:** Quarkus 3.x
-- **Build:** Maven 3.9
+- **Language:** Go 1.22
+- **HTTP framework:** Gin
+- **Database:** PostgreSQL (pgx/v5 driver, sqlc-generated queries)
+- **Migrations:** golang-migrate (SQL files in `migrations/`)
+- **Storage backends:** Filesystem (default) or S3 (aws-sdk-go-v2)
 
 ## Structure
 ```
-src/
-├── main/java/fusion/index/
-│   ├── registry/     # Job registration & lookup
-│   ├── schemas/      # Job definition schemas (Molecule-based)
-│   └── api/          # REST API endpoints (JAX-RS / RESTEasy Reactive)
-└── test/java/fusion/index/
+cmd/server/main.go              # entrypoint — config, pool, migrate, serve
+internal/
+├── config/config.go            # env var loading
+├── db/
+│   ├── queries/                # hand-written SQL (sqlc input)
+│   └── sqlc/                   # generated Go — DO NOT EDIT
+├── storage/
+│   ├── storage.go              # Storage interface
+│   ├── filesystem.go
+│   └── s3.go
+└── api/
+    ├── router.go               # gin setup, routes, CORS
+    ├── handlers/
+    │   ├── templates.go
+    │   ├── jobs.go
+    │   ├── artifacts.go
+    │   └── helpers.go          # shared path parsing, pagination, error helpers
+    └── dto/
+        ├── requests.go         # binding-tagged request structs
+        └── responses.go        # response structs + mapper functions
+migrations/                     # golang-migrate up-only SQL files
+tests/integration/              # real-Postgres tests via testcontainers-go
+sqlc.yaml                       # sqlc config
 ```
 
 ## Key Conventions
-- Use Quarkus Panache for persistence (active record or repository pattern)
-- REST endpoints follow RESTEasy Reactive (`@Path`, `@GET`, `@POST` etc.)
-- Validate all job schema inputs at the API boundary
+- All DB access goes through `internal/db/sqlc` (generated). Never write raw pgx queries outside that layer.
+- Regenerate after SQL changes: `~/go/bin/sqlc generate`
+- Transactions are opened in handlers that need atomicity (create + version bump). Pass `q.WithTx(tx)` to queries.
+- Nullable columns from sqlc become `*string` / `*int64` (`emit_pointers_for_null_types: true`). Timestamps are `pgtype.Timestamptz`; access `.Time` for `time.Time`.
+- Error responses always have shape `{"error": "..."}`.
 
 ## REST API (validated)
 
@@ -39,7 +60,30 @@ src/
 | GET/DELETE | `/api/v1/artifacts/{id}` | Get metadata / delete artifact |
 | GET | `/api/v1/artifacts/{id}/download` | Download artifact stream |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
-| GET | `/openapi`, `/swagger-ui` | API docs |
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `HTTP_PORT` | `8080` | Listen port |
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_NAME` | `fusion_index` | Database name |
+| `DB_USERNAME` | `fusion` | DB user |
+| `DB_PASSWORD` | `fusion` | DB password |
+| `STORAGE_BACKEND` | `FILESYSTEM` | `FILESYSTEM` or `S3` |
+| `STORAGE_FS_ROOT` | `~/.fusion-index/artifacts` | Root dir for filesystem storage |
+| `S3_BUCKET` | `fusion-index-artifacts` | S3 bucket name |
+| `AWS_REGION` | `us-east-1` | AWS region |
+| `S3_ENDPOINT_OVERRIDE` | _(empty)_ | Custom S3 endpoint (MinIO etc.) |
+
+## Local Testing
+
+```bash
+go test ./tests/integration/... -timeout 120s
+```
+
+Uses testcontainers-go to spin up a real PostgreSQL container. Docker must be running.
 
 ## Local Minikube Deployment
 
@@ -52,38 +96,9 @@ helm upgrade --install fusion-index deployment/ \
   --wait --timeout 3m
 ```
 
-- `values-dev.yaml`: `pullPolicy: Never`, `STORAGE_BACKEND: FILESYSTEM`, postgres persistence disabled, `createNamespace: false`
-- After rebuilding the image: `kubectl rollout restart deployment/index-backend -n fusion`
-- `eval $(minikube docker-env)` only affects the current shell — re-run in every new terminal before `docker build`
-- Port-forward requires `--address 127.0.0.1` or it fails silently: `kubectl port-forward -n fusion service/index-backend 18080:8080 --address 127.0.0.1`
-- Smoke-test once port-forward is running: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
-
-## Local Testing (no cluster needed)
-
-```bash
-mvn test
-```
-
-Uses H2 in-memory (test profile in `src/test/resources/application.properties`). No database or minikube required. Flyway disabled; Hibernate recreates schema via `drop-and-create`.
-
-## Known Pitfalls
-
-### `maven-compiler-plugin` must be pinned
-`pom.xml` must specify `<version>3.13.0</version>` on `maven-compiler-plugin`. Maven 3.8.x defaults
-to plugin 3.1 which ignores `<release>21</release>` and falls back to source/target 5,
-causing a compile error: `"Quelloption 5 wird nicht mehr unterstützt"`.
-
-### JAX-RS resource classes require a class-level `@Path`
-Without a class-level `@Path`, JAX-RS path specificity routes requests to the more-specific
-root resource class instead. Symptom: `"Unable to find matching target resource method"` even
-though the endpoint appears in the OpenAPI spec.
-
-Artifact endpoints are split across two classes for this reason:
-- `ArtifactResource` → `@Path("/api/v1/jobs")` — list + upload (under job version path)
-- `ArtifactByIdResource` → `@Path("/api/v1/artifacts")` — list all (paginated) / get / download / delete
-
-### Pagination pattern for list endpoints
-All paginated `list()` resource methods are annotated `@Transactional` so that `listAll` and `countAll` share a single transaction — keeping `total` consistent with the returned page. `page` is validated with `@Min(0)` and `pageSize` with `@Min(1)`; invalid values return 400.
+- After rebuilding: `kubectl rollout restart deployment/index-backend -n fusion`
+- Port-forward: `kubectl port-forward -n fusion service/index-backend 18080:8080 --address 127.0.0.1`
+- Smoke-test: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
 
 ## Branch Strategy
 `main` → `develop` → `feature/*`

@@ -1,9 +1,9 @@
 {{/*
 Backend Kubernetes Service name.
-Must be unique within the namespace. Defaults to "index-backend".
+Must be unique within the namespace. Defaults to "fusion-index-backend".
 */}}
 {{- define "fusion-index.backendServiceName" -}}
-{{- .Values.backend.serviceName | default "index-backend" }}
+{{- .Values.backend.serviceName | default "fusion-index-backend" }}
 {{- end }}
 
 {{/*

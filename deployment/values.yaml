@@ -18,7 +18,7 @@ backend:
     pullPolicy: IfNotPresent
 
   # Internal Kubernetes Service name for the backend
-  serviceName: index-backend
+  serviceName: fusion-index-backend
 
   replicas: 1
 
@@ -33,7 +33,44 @@ backend:
   # storageBackend: S3 | FILESYSTEM — defaults to S3 in production
   storageBackend: S3
 
-  javaOpts: "-Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+  # ginMode: release | debug | test — maps to GIN_MODE env var
+  ginMode: release
+
+  # dbSSLMode: disable | require | verify-full — maps to DB_SSLMODE
+  # Use "require" or "verify-full" when PostgreSQL has TLS enabled (production).
+  dbSSLMode: disable
+
+  # Optional extra annotations added to every pod created by this Deployment.
+  # Example:
+  #   podAnnotations:
+  #     prometheus.io/scrape: "true"
+  #     prometheus.io/port: "8080"
+  podAnnotations: {}
+
+  # Optional extra labels added to every pod created by this Deployment.
+  # Example:
+  #   podLabels:
+  #     team: platform
+  #     tier: backend
+  podLabels: {}
+
+  # Pod-level security context (spec.securityContext).
+  # Applied to all containers in the pod.
+  # Example:
+  #   podSecurityContext:
+  #     runAsNonRoot: true
+  #     runAsUser: 1000
+  #     fsGroup: 2000
+  podSecurityContext: {}
+
+  # Container-level security context (spec.containers[].securityContext).
+  # Example:
+  #   containerSecurityContext:
+  #     allowPrivilegeEscalation: false
+  #     readOnlyRootFilesystem: true
+  #     capabilities:
+  #       drop: [ALL]
+  containerSecurityContext: {}
 
   autoscaling:
     enabled: false
