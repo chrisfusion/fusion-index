@@ -3,7 +3,7 @@
 Stores, indexes, and exposes Fusion job definitions via REST API.
 
 ## Tech Stack
-- **Language:** Go 1.22
+- **Language:** Go 1.25
 - **HTTP framework:** Gin
 - **Database:** PostgreSQL (pgx/v5 driver, sqlc-generated queries)
 - **Migrations:** golang-migrate (SQL files in `migrations/`)
@@ -38,6 +38,8 @@ sqlc.yaml                       # sqlc config
 
 ## Key Conventions
 - All DB access goes through `internal/db/sqlc` (generated). Never write raw pgx queries outside that layer.
+- sqlc timestamp override for `pg_catalog.timestamptz → time.Time` does NOT apply; sqlc generates `pgtype.Timestamptz`. Always access `.Time` in response mappers.
+- golang-migrate uses `lib/pq` internally (not pgx). Append `?sslmode=disable` to DBURL or migrations fail against Bitnami Postgres (no TLS in dev).
 - Regenerate after SQL changes: `~/go/bin/sqlc generate`
 - Transactions are opened in handlers that need atomicity (create + version bump). Pass `q.WithTx(tx)` to queries.
 - Nullable columns from sqlc become `*string` / `*int64` (`emit_pointers_for_null_types: true`). Timestamps are `pgtype.Timestamptz`; access `.Time` for `time.Time`.
@@ -71,6 +73,7 @@ sqlc.yaml                       # sqlc config
 | `DB_NAME` | `fusion_index` | Database name |
 | `DB_USERNAME` | `fusion` | DB user |
 | `DB_PASSWORD` | `fusion` | DB password |
+| `DB_SSLMODE` | `disable` | `disable` / `require` / `verify-full` — must be set; golang-migrate uses lib/pq which defaults to require |
 | `STORAGE_BACKEND` | `FILESYSTEM` | `FILESYSTEM` or `S3` |
 | `STORAGE_FS_ROOT` | `~/.fusion-index/artifacts` | Root dir for filesystem storage |
 | `S3_BUCKET` | `fusion-index-artifacts` | S3 bucket name |
@@ -96,8 +99,8 @@ helm upgrade --install fusion-index deployment/ \
   --wait --timeout 3m
 ```
 
-- After rebuilding: `kubectl rollout restart deployment/index-backend -n fusion`
-- Port-forward: `kubectl port-forward -n fusion service/index-backend 18080:8080 --address 127.0.0.1`
+- After rebuilding: `kubectl rollout restart deployment/fusion-index-backend -n fusion`
+- Port-forward: `kubectl port-forward -n fusion service/fusion-index-backend 18080:8080 --address 127.0.0.1`
 - Smoke-test: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
 
 ## Branch Strategy
