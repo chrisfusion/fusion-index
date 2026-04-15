@@ -17,6 +17,7 @@ This document describes the internal design of **fusion-index**: how an HTTP req
 9. [Error Handling](#error-handling)
 10. [Configuration and Startup](#configuration-and-startup)
 11. [Health Probes](#health-probes)
+12. [OpenAPI Spec](#openapi-spec)
 
 ---
 
@@ -33,7 +34,7 @@ This document describes the internal design of **fusion-index**: how an HTTP req
                    ┌──────────┴──────────┐
                    ▼                     ▼
              PostgreSQL            S3 / Filesystem
-           (metadata store)       (artifact store)
+           (metadata store)       (artifact bytes)
 ```
 
 **fusion-index** is a stateless REST service. All persistent state lives in PostgreSQL (metadata) and in S3 or the local filesystem (artifact bytes). Multiple replicas can run concurrently against the same database.
@@ -45,6 +46,8 @@ This document describes the internal design of **fusion-index**: how an HTTP req
 ```
 ┌─────────────────────────────────────────────────┐
 │               HTTP (Gin router)                 │  router.go
+├─────────────────────────────────────────────────┤
+│     OpenAPI spec + Swagger UI (embedded)        │  openapi/handler.go
 ├─────────────────────────────────────────────────┤
 │            Request / Response DTOs              │  dto/requests.go
 │             (binding + validation)              │  dto/responses.go
@@ -63,11 +66,10 @@ This document describes the internal design of **fusion-index**: how an HTTP req
 └─────────────────────────────────────────────────┘
 ```
 
-Each layer has a single responsibility:
-
 | Layer | Responsibility |
 |-------|---------------|
 | Router | Route registration, CORS, middleware |
+| OpenAPI | Embedded spec + Swagger UI served from binary |
 | DTOs | Bind + validate request bodies; shape response JSON |
 | Handlers | Business logic, transaction management, error mapping |
 | sqlc | Type-safe SQL execution; zero raw queries outside this layer |
@@ -77,54 +79,69 @@ Each layer has a single responsibility:
 
 ## Request Lifecycle
 
-### Read request (e.g., `GET /api/v1/jobs/{id}`)
+### Read request (`GET /api/v1/artifacts/{id}`)
 
 ```
 Client
   │
   ▼
-Gin router  →  matches route, extracts path param
+Gin router  →  match route, extract {id}
   │
   ▼
-Handler: GetJob
-  ├── pathID(c)            — parse + validate {id} from URL
-  ├── q.GetJobByID(ctx, id) — sqlc query → pgxpool
-  ├── if pgx.ErrNoRows    → 404 {"error": "not found"}
-  └── ToJobResponse(row)  → 200 {"id": ..., "name": ..., ...}
+ArtifactHandler.Get
+  ├── pathID(c)                       — parse + validate int64 path param
+  ├── q.GetRegistryArtifact(ctx, id)  — sqlc query → pgxpool
+  ├── pgx.ErrNoRows                  → 404 {"error": "artifact not found"}
+  └── ToArtifactResponse(row)        → 200 {id, fullName, description, ...}
 ```
 
-### Write request with transaction (e.g., `POST /api/v1/jobs`)
+### Write request with transaction (`POST /api/v1/artifacts`)
 
 ```
 Client
   │
   ▼
-Gin router
-  │
-  ▼
-Handler: CreateJob
-  ├── c.ShouldBindJSON(&req)       — validate body
-  ├── q.GetJobByName(ctx, name)    — duplicate check → 409 if exists
-  ├── pool.Begin(ctx)              — open transaction
-  │     ├── q.WithTx(tx).CreateJob(...)         — insert row
-  │     ├── q.WithTx(tx).IncrementJobVersion()  — bump counter
-  │     └── q.WithTx(tx).CreateJobVersion(...)  — insert version 1
+ArtifactHandler.Create
+  ├── c.ShouldBindJSON(&req)               — validate body (fullName required)
+  ├── pool.Begin(ctx)                      — open transaction
+  │     ├── q.GetRegistryArtifactByName()  — duplicate check → 409 if exists
+  │     └── q.CreateRegistryArtifact(...)  — insert row
   ├── tx.Commit(ctx)
-  └── ToJobResponse(row) → 201
+  └── ToArtifactResponse(row) → 201
 ```
 
-### Artifact upload (`POST /api/v1/jobs/{jobId}/versions/{n}/artifacts`)
+### Version create with tags (`POST /api/v1/artifacts/{id}/versions`)
 
 ```
-Client  ──multipart/form-data──►  Handler: UploadArtifact
+Client
   │
-  ├── parse path params (jobId, versionNumber)
-  ├── validate job version exists
-  ├── c.Request.FormFile("file")          — read multipart header
-  ├── q.CreateArtifact(..., "PENDING")    — register in DB first
-  ├── storage.Store(path, reader, size)  — stream bytes to backend
-  ├── if error → q.UpdateArtifactStatus(id, "ERROR")
-  └── else    → q.UpdateArtifactStored(id, storagePath) → "AVAILABLE"
+  ▼
+VersionHandler.Create
+  ├── c.ShouldBindJSON(&req)               — validate (version required, semver format)
+  ├── semver.Parse(req.Version)            — parse major.minor.patch
+  ├── pool.Begin(ctx)
+  │     ├── q.GetRegistryArtifact()        — 404 if artifact missing
+  │     ├── q.CreateArtifactVersion(...)   — 409 on unique(artifact_id, major, minor, patch)
+  │     └── q.UpsertArtifactTag(...)  ×N   — atomically assign each tag
+  ├── tx.Commit(ctx)
+  └── ToVersionResponse(version, tagRows) → 201
+```
+
+### File upload (`POST /api/v1/artifacts/{id}/versions/{semver}/files`)
+
+```
+Client  ──multipart/form-data──►  FileHandler.Upload
+  │
+  ├── resolveVersion(c)              — parse artifactID + semver, look up version row
+  ├── c.Request.FormFile("file")     — read multipart header (no body buffering)
+  ├── q.CreateArtifactFile("pending") — insert DB row, status=PENDING
+  ├── unique violation (23505)       → 409 (duplicate filename for this version)
+  ├── compute storagePath            — "{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}"
+  ├── storage.Store(path, reader)    — stream bytes to backend
+  │     └── error → q.UpdateArtifactFileStatus(ERROR)  → 500
+  ├── q.UpdateArtifactFileStored(path) — set status=AVAILABLE + real path
+  │     └── error → q.UpdateArtifactFileStatus(ERROR) + storage.Delete(path) → 500
+  └── ToFileResponse(record) → 201 {id, name, status: "AVAILABLE", downloadUrl, ...}
 ```
 
 ---
@@ -132,65 +149,57 @@ Client  ──multipart/form-data──►  Handler: UploadArtifact
 ## Data Model
 
 ```
-job_templates
-  id          BIGINT  PK (sequence 1, increment 50)
-  name        TEXT    UNIQUE NOT NULL
-  description TEXT
-  version     INT     NOT NULL DEFAULT 1
-  created_at  TIMESTAMPTZ
-  updated_at  TIMESTAMPTZ
+registry_artifact
+  id           BIGINT   PK (sequence, increment 50)
+  full_name    VARCHAR(500)  UNIQUE NOT NULL          ← "org.team.name"
+  description  TEXT
+  created_at   TIMESTAMPTZ
+  updated_at   TIMESTAMPTZ
        │
        │  1 : N
        ▼
-job_template_versions
-  id                  BIGINT  PK
-  job_template_id     BIGINT  FK → job_templates.id
-  version_number      INT     NOT NULL
-  description         TEXT
-  schema_definition   TEXT
-  created_at          TIMESTAMPTZ
-       │
-       │  1 : N  (a job pins to a specific template version)
-       ▼
-jobs
-  id                       BIGINT  PK
-  name                     TEXT    UNIQUE NOT NULL
-  description              TEXT
-  job_template_version_id  BIGINT  FK → job_template_versions.id
-  version                  INT     NOT NULL DEFAULT 1
-  config                   TEXT
-  created_at               TIMESTAMPTZ
-  updated_at               TIMESTAMPTZ
+registry_artifact_version
+  id           BIGINT   PK
+  artifact_id  BIGINT   FK → registry_artifact.id  ON DELETE CASCADE
+  major        INT      NOT NULL
+  minor        INT      NOT NULL
+  patch        INT      NOT NULL
+  config       TEXT                                  ← raw JSON or YAML
+  created_at   TIMESTAMPTZ
+  UNIQUE (artifact_id, major, minor, patch)
        │
        │  1 : N
        ▼
-job_versions
-  id               BIGINT  PK
-  job_id           BIGINT  FK → jobs.id
-  version_number   INT     NOT NULL
-  description      TEXT
-  created_at       TIMESTAMPTZ
-       │
-       │  1 : N
-       ▼
-artifacts
-  id               BIGINT  PK
-  job_version_id   BIGINT  FK → job_versions.id
-  filename         TEXT    NOT NULL
+registry_artifact_file
+  id               BIGINT   PK
+  version_id       BIGINT   FK → registry_artifact_version.id  ON DELETE CASCADE
+  name             TEXT     NOT NULL
   content_type     TEXT
   size_bytes       BIGINT
-  storage_path     TEXT               — logical key for storage backend
-  status           TEXT               — PENDING | AVAILABLE | ERROR
+  storage_backend  TEXT     NOT NULL                 ← "FILESYSTEM" or "S3"
+  storage_path     TEXT     NOT NULL
+  status           TEXT     NOT NULL  DEFAULT 'PENDING'  ← PENDING | AVAILABLE | ERROR
   created_at       TIMESTAMPTZ
+  updated_at       TIMESTAMPTZ
+  UNIQUE (version_id, name)
+
+registry_artifact_tag
+  id           BIGINT   PK
+  artifact_id  BIGINT   FK → registry_artifact.id  ON DELETE CASCADE
+  tag          VARCHAR(255)  NOT NULL
+  version_id   BIGINT   FK → registry_artifact_version.id  ON DELETE CASCADE
+  created_at   TIMESTAMPTZ
+  updated_at   TIMESTAMPTZ
+  UNIQUE (artifact_id, tag)                          ← tag is unique per artifact
 ```
 
 Key design decisions:
 
-- **Sequence increment 50** — matches Hibernate allocationSize default, avoids conflicts if the DB is accessed by JPA-based tools in the future.
-- **`version` counter on templates and jobs** — monotonically incrementing application-managed counter, separate from the versioned-row PK.
-- **`status` on artifacts** — two-phase write (PENDING → AVAILABLE/ERROR) ensures the row exists in the DB before the storage call, making partial failures observable and recoverable.
-- **No hard deletes on versions** — template and job versions are append-only. Only top-level templates, jobs, and artifacts support DELETE.
-- **Referential integrity** — deleting a template is blocked if any job references one of its versions (enforced at the handler layer via `CountJobsForTemplate` before issuing DELETE).
+- **Sequence increment 50** — avoids collisions if JPA-based tools ever access the same DB.
+- **`status` on files** — two-phase write (PENDING → AVAILABLE/ERROR) ensures the DB row exists before the storage call; partial failures are observable.
+- **Storage path includes file ID** — `{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}` guarantees storage-key uniqueness even if a file with the same name is re-uploaded after deletion.
+- **Tag upsert** — `ON CONFLICT (artifact_id, tag) DO UPDATE SET version_id = EXCLUDED.version_id` atomically moves a tag with no application-side conflict check.
+- **Cascade deletes** — deleting an artifact removes all versions, files, and tags automatically at the DB level; the version DELETE handler also performs best-effort storage cleanup before removing the version row.
 
 ---
 
@@ -198,52 +207,51 @@ Key design decisions:
 
 ### Base path: `/api/v1`
 
-#### Templates
-
-| Method | Path | Status codes | Description |
-|--------|------|-------------|-------------|
-| `GET` | `/templates` | 200 | List (paginated) |
-| `POST` | `/templates` | 201, 400, 409 | Create |
-| `GET` | `/templates/{id}` | 200, 404 | Get by ID |
-| `PUT` | `/templates/{id}` | 200, 404 | Update name/description |
-| `DELETE` | `/templates/{id}` | 204, 404, 409 | Delete (blocked if jobs exist) |
-| `GET` | `/templates/{id}/versions` | 200, 404 | List versions |
-| `POST` | `/templates/{id}/versions` | 201, 404 | Publish new version |
-| `GET` | `/templates/{id}/versions/{n}` | 200, 404 | Get specific version |
-
-#### Jobs
-
-| Method | Path | Status codes | Description |
-|--------|------|-------------|-------------|
-| `GET` | `/jobs` | 200 | List (paginated) |
-| `POST` | `/jobs` | 201, 400, 409 | Create (requires valid templateVersionId) |
-| `GET` | `/jobs/{id}` | 200, 404 | Get by ID |
-| `PUT` | `/jobs/{id}` | 200, 404 | Update name/description/config |
-| `DELETE` | `/jobs/{id}` | 204, 404 | Delete |
-| `GET` | `/jobs/{id}/versions` | 200, 404 | List versions |
-| `POST` | `/jobs/{id}/versions` | 201, 404 | Publish new version |
-| `GET` | `/jobs/{id}/versions/{n}` | 200, 404 | Get specific version |
-
 #### Artifacts
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
-| `GET` | `/jobs/{jobId}/versions/{n}/artifacts` | 200, 404 | List artifacts for a job version |
-| `POST` | `/jobs/{jobId}/versions/{n}/artifacts` | 201, 400, 404 | Upload artifact (multipart/form-data) |
-| `GET` | `/artifacts` | 200 | List all artifacts (paginated, `createdAt` DESC) |
-| `GET` | `/artifacts/{id}` | 200, 404 | Get artifact metadata |
-| `GET` | `/artifacts/{id}/download` | 200, 404, 502 | Download artifact (streamed) |
-| `DELETE` | `/artifacts/{id}` | 204, 404 | Delete (storage + DB) |
+| `GET` | `/artifacts` | 200 | List (paginated); filter `?name=` prefix or `?tag=` |
+| `POST` | `/artifacts` | 201, 400, 409 | Create |
+| `GET` | `/artifacts/{id}` | 200, 404 | Get by ID |
+| `PUT` | `/artifacts/{id}` | 200, 400, 404 | Update description |
+| `DELETE` | `/artifacts/{id}` | 204, 404 | Delete (cascades to versions, files, tags) |
+
+#### Versions
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/artifacts/{id}/versions` | 200, 404 | List (newest first) |
+| `POST` | `/artifacts/{id}/versions` | 201, 400, 404, 409 | Create; body: `version`, `config`, `tags[]` |
+| `GET` | `/artifacts/{id}/versions/{semver}` | 200, 400, 404 | Get |
+| `DELETE` | `/artifacts/{id}/versions/{semver}` | 204, 400, 404 | Delete (best-effort storage cleanup) |
+
+#### Tags
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `PUT` | `/artifacts/{id}/tags/{tag}` | 200, 400, 404 | Assign tag (body: `{"version":"1.2.3"}`); moves if exists |
+| `DELETE` | `/artifacts/{id}/tags/{tag}` | 204, 404 | Delete tag |
+
+#### Files
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/artifacts/{id}/versions/{semver}/files` | 200, 400, 404 | List files |
+| `POST` | `/artifacts/{id}/versions/{semver}/files` | 201, 400, 404, 409 | Upload (multipart `file` field) |
+| `GET` | `/artifacts/{id}/versions/{semver}/files/{fileId}` | 200, 404 | File metadata |
+| `GET` | `/artifacts/{id}/versions/{semver}/files/{fileId}/download` | 200, 404 | Download stream |
+| `DELETE` | `/artifacts/{id}/versions/{semver}/files/{fileId}` | 204, 404 | Delete file + storage object |
 
 #### Pagination
 
-All list endpoints accept `?page=1&pageSize=20`. Default: `page=1`, `pageSize=20`. Response envelope:
+List artifacts accepts `?page=0&pageSize=20`. Default: `page=0`, `pageSize=20`. Response envelope:
 
 ```json
 {
   "items": [...],
   "total": 142,
-  "page": 1,
+  "page": 0,
   "pageSize": 20
 }
 ```
@@ -252,8 +260,8 @@ All list endpoints accept `?page=1&pageSize=20`. Default: `page=1`, `pageSize=20
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/q/health/live` | Liveness — always 200 if process is up |
-| `GET` | `/q/health/ready` | Readiness — 200 if DB ping succeeds |
+| `GET` | `/q/health/live` | Always 200 if process is up |
+| `GET` | `/q/health/ready` | 200 if DB ping succeeds, 503 otherwise |
 
 ---
 
@@ -261,26 +269,24 @@ All list endpoints accept `?page=1&pageSize=20`. Default: `page=1`, `pageSize=20
 
 ```go
 type Storage interface {
-    Store(suggestedPath string, data io.Reader, sizeHint int64, contentType string) (storagePath string, err error)
-    Retrieve(storagePath string) (io.ReadCloser, error)
-    Delete(storagePath string) error
+    Store(path string, data io.Reader, size int64, contentType string) error
+    Retrieve(path string) (io.ReadCloser, error)
+    Delete(path string) error
 }
 ```
 
-The `storagePath` returned by `Store` is an opaque string persisted in the `artifacts.storage_path` column. Handlers never construct storage paths themselves — they always receive the canonical path back from the backend.
+Storage paths follow the scheme `{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}`. The file's DB ID is included to ensure uniqueness even across re-uploads of the same filename.
 
 ### FilesystemBackend
 
-- Files stored at `{STORAGE_FS_ROOT}/{uuid}`.
+- Root at `STORAGE_FS_ROOT` (default `~/.fusion-index/artifacts`).
 - `Retrieve` returns an `*os.File` which Gin streams to the client.
-- `Delete` calls `os.Remove`.
 
 ### S3Backend
 
-- Objects stored at `{uuid}` (bucket-root flat layout).
 - Uses `aws-sdk-go-v2`. Endpoint override enables MinIO and Ceph.
-- `ContentLength` is passed to S3 when `sizeHint > 0` (avoids chunked encoding).
-- `Retrieve` returns the S3 `GetObject` body (an `io.ReadCloser`).
+- Authentication via standard AWS credential chain: env vars → IRSA → instance profile.
+- `Retrieve` returns the S3 `GetObject` body (`io.ReadCloser`).
 
 ---
 
@@ -289,9 +295,9 @@ The `storagePath` returned by `Store` is an opaque string persisted in the `arti
 All DB access goes through generated code in `internal/db/sqlc/`. The generation source is:
 
 ```
-sqlc.yaml          ← config
-internal/db/queries/*.sql  ← hand-written SQL
-migrations/*.up.sql        ← schema (sqlc reads for type inference)
+sqlc.yaml                        ← config
+internal/db/queries/*.sql        ← hand-written SQL
+migrations/*.up.sql              ← schema (sqlc reads for type inference)
 ```
 
 Regenerate after any SQL change:
@@ -300,13 +306,11 @@ Regenerate after any SQL change:
 ~/go/bin/sqlc generate
 ```
 
-Key sqlc settings:
-
 | Setting | Value | Effect |
 |---------|-------|--------|
-| `sql_package` | `pgx/v5` | Uses pgx directly (no `database/sql` overhead) |
+| `sql_package` | `pgx/v5` | Uses pgx directly |
 | `emit_pointers_for_null_types` | `true` | Nullable columns → `*string`, `*int64` |
-| Timestamp type | `pgtype.Timestamptz` | Access `.Time` for `time.Time` in mappers |
+| Timestamp type | `pgtype.Timestamptz` | Access `.Time` in response mappers |
 
 ---
 
@@ -316,12 +320,10 @@ Transactions are opened only where atomicity is required:
 
 | Operation | Why |
 |-----------|-----|
-| `CreateTemplate` | Insert template + increment version counter + insert version 1 |
-| `PublishTemplateVersion` | Increment counter + insert new version row |
-| `CreateJob` | Insert job + increment version counter + insert version 1 |
-| `PublishJobVersion` | Increment counter + insert new version row |
+| `CreateArtifact` | Duplicate-name check + insert must be atomic |
+| `CreateVersion` | Version insert + N tag upserts must be atomic |
 
-The `pgxpool.Pool` is passed to handlers; transactions are created with `pool.Begin(ctx)` and the query object is wrapped with `q.WithTx(tx)`. All other operations are single-query and run without explicit transactions.
+All other operations are single-query and run without explicit transactions. Read-only handlers (List, Get) use `h.queries` directly — no transaction needed.
 
 ---
 
@@ -337,13 +339,15 @@ Handler helpers in `internal/api/handlers/helpers.go`:
 
 | Helper | Behaviour |
 |--------|-----------|
-| `notFoundOrInternal(c, err)` | Returns 404 if `errors.Is(err, pgx.ErrNoRows)`, else 500 |
-| `internalError(c, err)` | Always returns 500 with `{"error": "internal server error"}` |
-| `pathID(c, param)` | Parses int64 path param; aborts with 400 on invalid input |
-| `pathVersionNumber(c)` | Same, specifically for `{n}` version segments |
-| `parsePagination(c)` | Returns page + pageSize with defaults and floor clamping |
-
-409 Conflict is returned explicitly in handlers when a duplicate name is detected or when a referential delete is blocked.
+| `notFoundOrInternal(c, err, msg)` | 404 if `pgx.ErrNoRows`, else 500 |
+| `internalError(c, err)` | Always 500 |
+| `conflictError(c, msg)` | Always 409 |
+| `pathID(c)` | Parses `{id}` as int64; 400 on failure |
+| `pathFileID(c)` | Parses `{fileId}` as int64; 400 on failure |
+| `pathSemver(c)` | Parses `{semver}` via `semver.Parse`; 400 on failure |
+| `parsePagination(c)` | Returns page + pageSize with defaults (0, 20) and floor clamping |
+| `isUniqueViolation(err)` | `pgconn.PgError.Code == "23505"` |
+| `isNotFound(err)` | `errors.Is(err, pgx.ErrNoRows)` |
 
 ---
 
@@ -352,13 +356,13 @@ Handler helpers in `internal/api/handlers/helpers.go`:
 `cmd/server/main.go` startup sequence:
 
 ```
-1. config.Load()           — read all env vars
-2. pgxpool.New(ctx, DBURL) — open connection pool
-3. pool.Ping(ctx)          — verify connectivity (fail-fast)
-4. runMigrations(DBURL)    — golang-migrate, file://migrations/
-5. storage.New(cfg)        — build FilesystemBackend or S3Backend
-6. api.NewRouter(pool, storage) — register all Gin routes
-7. router.Run(":PORT")     — start serving
+1. config.Load()            — read all env vars
+2. pgxpool.New(ctx, DBURL)  — open connection pool
+3. pool.Ping(ctx)           — verify connectivity (fail-fast)
+4. runMigrations(DBURL)     — golang-migrate, file://migrations/
+5. storage.New(cfg)         — build FilesystemBackend or S3Backend
+6. api.NewRouter(...)       — register all Gin routes
+7. router.Run(":PORT")      — start serving
 ```
 
 Migrations run on every startup. golang-migrate uses an advisory lock and a `schema_migrations` table to ensure idempotence.
@@ -373,3 +377,16 @@ Migrations run on every startup. golang-migrate uses an advisory lock and a `sch
 | Readiness | `GET /q/health/ready` | Pings the PostgreSQL pool; returns `{"status":"DOWN"}` + 503 if unreachable |
 
 Kubernetes Deployment uses `initialDelaySeconds: 15` for readiness and `initialDelaySeconds: 30` for liveness to allow migration time on cold start.
+
+---
+
+## OpenAPI Spec
+
+The OpenAPI 3.1 spec is hand-written in `internal/api/openapi/openapi.yaml` and embedded into the binary at compile time via `//go:embed`. It is served at runtime as JSON:
+
+| Path | Description |
+|------|-------------|
+| `GET /api/openapi.json` | OpenAPI 3.1 spec as JSON |
+| `GET /swagger/` | Swagger UI (HTML embedded in binary; assets from CDN) |
+
+The YAML→JSON conversion happens once in `init()`. A `normaliseYAML()` helper converts any `map[any]any` values produced by `gopkg.in/yaml.v3` before passing to `encoding/json`.

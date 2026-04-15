@@ -147,27 +147,26 @@ eval $(minikube docker-env)
 docker build -t fusion-index:latest .
 ```
 
-### Create a dev values override
+### Use the included dev values
 
-`deployment/values-dev.yaml` (already present in the repo):
+`deployment/values-dev.yaml` is already present in the repo with sensible local defaults:
 
 ```yaml
 backend:
   image:
     tag: latest
-    pullPolicy: Never   # use the locally-built image
+    pullPolicy: Never       # image loaded directly into minikube — no registry pull
+  storageBackend: FILESYSTEM  # no S3 needed in dev
   ginMode: debug
-  replicas: 1
 
 postgresql:
   auth:
-    password: "dev-password"
+    password: "devpass"
+  primary:
+    persistence:
+      enabled: false        # no PVC in dev
 
-s3:
-  credentialsType: static
-  accessKeyId: minioadmin
-  secretAccessKey: minioadmin
-  endpointOverride: ""   # set to MinIO ClusterIP if using S3 in dev
+# s3 block intentionally omitted — FILESYSTEM storage skips all S3 wiring
 ```
 
 ### Install (or upgrade)
@@ -197,6 +196,10 @@ kubectl get pods -n fusion
 ```bash
 kubectl port-forward -n fusion service/fusion-index-backend 18080:8080 --address 127.0.0.1 &
 curl -s http://127.0.0.1:18080/q/health/ready
+# {"status":"UP"}
+
+# Browse the API docs
+open http://127.0.0.1:18080/swagger/
 ```
 
 ### After rebuilding the image
@@ -302,7 +305,7 @@ STORAGE_BACKEND=FILESYSTEM
 STORAGE_FS_ROOT=/data/artifacts   # must be on a persistent volume in K8s
 ```
 
-Files are stored under `{STORAGE_FS_ROOT}/{uuid}`. In Kubernetes you need a `PersistentVolumeClaim` mounted at that path.
+Files are stored at `{STORAGE_FS_ROOT}/{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}`. In Kubernetes you need a `PersistentVolumeClaim` mounted at that path.
 
 ### S3 / S3-compatible
 

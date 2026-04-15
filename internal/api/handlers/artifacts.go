@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,125 +8,94 @@ import (
 
 	"fusion-platform/fusion-index/internal/api/dto"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
-	"fusion-platform/fusion-index/internal/storage"
 )
 
 type ArtifactHandler struct {
-	pool           *pgxpool.Pool
-	queries        *db.Queries
-	storage        storage.Storage
-	storageBackend string
+	pool    *pgxpool.Pool
+	queries *db.Queries
 }
 
-func NewArtifactHandler(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, backend string) *ArtifactHandler {
-	return &ArtifactHandler{pool: pool, queries: q, storage: s, storageBackend: backend}
+func NewArtifactHandler(pool *pgxpool.Pool, q *db.Queries) *ArtifactHandler {
+	return &ArtifactHandler{pool: pool, queries: q}
 }
 
-func (h *ArtifactHandler) ListForJobVersion(c *gin.Context) {
-	jobID, ok := pathID(c)
-	if !ok {
-		return
-	}
-	vn, ok := pathVersionNumber(c)
-	if !ok {
-		return
-	}
-
-	jv, err := h.queries.GetJobVersionByJobAndNumber(c, db.GetJobVersionByJobAndNumberParams{
-		JobID:         jobID,
-		VersionNumber: int32(vn),
-	})
-	if err != nil {
-		notFoundOrInternal(c, err, "Job version not found")
-		return
-	}
-
-	artifacts, err := h.queries.ListArtifactsByJobVersion(c, jv.ID)
-	if err != nil {
-		internalError(c, err)
-		return
-	}
-	resp := make([]dto.ArtifactResponse, len(artifacts))
-	for i, a := range artifacts {
-		resp[i] = dto.ToArtifactResponse(a)
-	}
-	c.JSON(http.StatusOK, resp)
-}
-
-func (h *ArtifactHandler) Upload(c *gin.Context) {
-	jobID, ok := pathID(c)
-	if !ok {
-		return
-	}
-	vn, ok := pathVersionNumber(c)
-	if !ok {
-		return
-	}
-
-	jv, err := h.queries.GetJobVersionByJobAndNumber(c, db.GetJobVersionByJobAndNumberParams{
-		JobID:         jobID,
-		VersionNumber: int32(vn),
-	})
-	if err != nil {
-		notFoundOrInternal(c, err, "Job version not found")
-		return
-	}
-
-	file, header, err := c.Request.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "file field is required"})
-		return
-	}
-	defer file.Close()
-
-	contentType := c.Request.FormValue("contentType")
-	if contentType == "" {
-		contentType = header.Header.Get("Content-Type")
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	storagePath := fmt.Sprintf("%d/%s", jv.ID, header.Filename)
-
-	artifact, err := h.queries.CreateArtifact(c, db.CreateArtifactParams{
-		JobVersionID:   jv.ID,
-		Name:           header.Filename,
-		ContentType:    &contentType,
-		StorageBackend: h.storageBackend,
-		StoragePath:    storagePath,
-	})
-	if err != nil {
-		internalError(c, err)
-		return
-	}
-
-	resolvedPath, err := h.storage.Store(storagePath, file, header.Size, contentType)
-	if err != nil {
-		_, _ = h.queries.UpdateArtifactStatus(c, db.UpdateArtifactStatusParams{
-			ID:     artifact.ID,
-			Status: "ERROR",
-		})
-		internalError(c, err)
-		return
-	}
-
-	status := "AVAILABLE"
-	updated, err := h.queries.UpdateArtifactStored(c, db.UpdateArtifactStoredParams{
-		ID:          artifact.ID,
-		StoragePath: resolvedPath,
-		SizeBytes:   &header.Size,
-		Status:      status,
-	})
-	if err != nil {
-		internalError(c, err)
-		return
-	}
-	c.JSON(http.StatusCreated, dto.ToArtifactResponse(updated))
-}
-
-func (h *ArtifactHandler) ListAll(c *gin.Context) {
+func (h *ArtifactHandler) List(c *gin.Context) {
 	page, pageSize := parsePagination(c)
+	name := c.Query("name")
+	tag := c.Query("tag")
+	types := c.QueryArray("type")
+
+	var artifacts []db.RegistryArtifact
+	var total int64
+	var err error
+
+	switch {
+	case len(types) > 0:
+		artifacts, err = h.queries.ListRegistryArtifactsByTypes(c, db.ListRegistryArtifactsByTypesParams{
+			Column1: types,
+			Limit:   int32(pageSize),
+			Offset:  int32(page * pageSize),
+		})
+		if err != nil {
+			internalError(c, err)
+			return
+		}
+		total, err = h.queries.CountRegistryArtifactsByTypes(c, types)
+	case name != "":
+		pattern := name + "%"
+		artifacts, err = h.queries.ListRegistryArtifactsByName(c, db.ListRegistryArtifactsByNameParams{
+			FullName: pattern,
+			Limit:    int32(pageSize),
+			Offset:   int32(page * pageSize),
+		})
+		if err != nil {
+			internalError(c, err)
+			return
+		}
+		total, err = h.queries.CountRegistryArtifactsByName(c, pattern)
+	case tag != "":
+		artifacts, err = h.queries.ListRegistryArtifactsByTag(c, db.ListRegistryArtifactsByTagParams{
+			Tag:    tag,
+			Limit:  int32(pageSize),
+			Offset: int32(page * pageSize),
+		})
+		if err != nil {
+			internalError(c, err)
+			return
+		}
+		total, err = h.queries.CountRegistryArtifactsByTag(c, tag)
+	default:
+		artifacts, err = h.queries.ListRegistryArtifacts(c, db.ListRegistryArtifactsParams{
+			Limit:  int32(pageSize),
+			Offset: int32(page * pageSize),
+		})
+		if err != nil {
+			internalError(c, err)
+			return
+		}
+		total, err = h.queries.CountRegistryArtifacts(c)
+	}
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+
+	typesByArtifact := h.batchFetchTypes(c, artifacts)
+	items := make([]dto.ArtifactResponse, len(artifacts))
+	for i, a := range artifacts {
+		items[i] = dto.ToArtifactResponse(a, typesByArtifact[a.ID])
+	}
+	c.JSON(http.StatusOK, dto.PageResponse[dto.ArtifactResponse]{
+		Items: items, Total: total, Page: page, PageSize: pageSize,
+	})
+}
+
+func (h *ArtifactHandler) Create(c *gin.Context) {
+	var req dto.CreateArtifactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	tx, err := h.pool.Begin(c)
 	if err != nil {
@@ -137,15 +105,20 @@ func (h *ArtifactHandler) ListAll(c *gin.Context) {
 	defer tx.Rollback(c)
 	q := h.queries.WithTx(tx)
 
-	artifacts, err := q.ListArtifacts(c, db.ListArtifactsParams{
-		Limit:  int32(pageSize),
-		Offset: int32(page * pageSize),
-	})
-	if err != nil {
+	_, err = q.GetRegistryArtifactByName(c, req.FullName)
+	if err == nil {
+		conflictError(c, "artifact with this name already exists")
+		return
+	}
+	if !isNotFound(err) {
 		internalError(c, err)
 		return
 	}
-	total, err := q.CountArtifacts(c)
+
+	a, err := q.CreateRegistryArtifact(c, db.CreateRegistryArtifactParams{
+		FullName:    req.FullName,
+		Description: req.Description,
+	})
 	if err != nil {
 		internalError(c, err)
 		return
@@ -154,14 +127,7 @@ func (h *ArtifactHandler) ListAll(c *gin.Context) {
 		internalError(c, err)
 		return
 	}
-
-	items := make([]dto.ArtifactResponse, len(artifacts))
-	for i, a := range artifacts {
-		items[i] = dto.ToArtifactResponse(a)
-	}
-	c.JSON(http.StatusOK, dto.PageResponse[dto.ArtifactResponse]{
-		Items: items, Total: total, Page: page, PageSize: pageSize,
-	})
+	c.JSON(http.StatusCreated, dto.ToArtifactResponse(a, nil))
 }
 
 func (h *ArtifactHandler) Get(c *gin.Context) {
@@ -169,42 +135,43 @@ func (h *ArtifactHandler) Get(c *gin.Context) {
 	if !ok {
 		return
 	}
-	a, err := h.queries.GetArtifact(c, id)
+	a, err := h.queries.GetRegistryArtifact(c, id)
 	if err != nil {
-		notFoundOrInternal(c, err, fmt.Sprintf("Artifact not found: %d", id))
+		notFoundOrInternal(c, err, "artifact not found")
 		return
 	}
-	c.JSON(http.StatusOK, dto.ToArtifactResponse(a))
-}
-
-func (h *ArtifactHandler) Download(c *gin.Context) {
-	id, ok := pathID(c)
-	if !ok {
-		return
-	}
-	a, err := h.queries.GetArtifact(c, id)
-	if err != nil {
-		notFoundOrInternal(c, err, fmt.Sprintf("Artifact not found: %d", id))
-		return
-	}
-	if a.Status != "AVAILABLE" {
-		c.JSON(http.StatusConflict, gin.H{"error": "Artifact is not available: status=" + a.Status})
-		return
-	}
-
-	rc, err := h.storage.Retrieve(a.StoragePath)
+	types, err := h.queries.ListArtifactTypesByArtifactID(c, id)
 	if err != nil {
 		internalError(c, err)
 		return
 	}
-	defer rc.Close()
+	c.JSON(http.StatusOK, dto.ToArtifactResponse(a, types))
+}
 
-	mime := "application/octet-stream"
-	if a.ContentType != nil {
-		mime = *a.ContentType
+func (h *ArtifactHandler) Update(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, a.Name))
-	c.DataFromReader(http.StatusOK, -1, mime, rc, nil)
+	var req dto.UpdateArtifactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	a, err := h.queries.UpdateRegistryArtifact(c, db.UpdateRegistryArtifactParams{
+		ID:          id,
+		Description: req.Description,
+	})
+	if err != nil {
+		notFoundOrInternal(c, err, "artifact not found")
+		return
+	}
+	types, err := h.queries.ListArtifactTypesByArtifactID(c, id)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.ToArtifactResponse(a, types))
 }
 
 func (h *ArtifactHandler) Delete(c *gin.Context) {
@@ -212,17 +179,41 @@ func (h *ArtifactHandler) Delete(c *gin.Context) {
 	if !ok {
 		return
 	}
-	a, err := h.queries.GetArtifact(c, id)
-	if err != nil {
-		notFoundOrInternal(c, err, fmt.Sprintf("Artifact not found: %d", id))
+	if _, err := h.queries.GetRegistryArtifact(c, id); err != nil {
+		notFoundOrInternal(c, err, "artifact not found")
 		return
 	}
-	// Best-effort storage cleanup
-	_ = h.storage.Delete(a.StoragePath)
-
-	if err := h.queries.DeleteArtifact(c, id); err != nil {
+	if err := h.queries.DeleteRegistryArtifact(c, id); err != nil {
 		internalError(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// batchFetchTypes fetches all types for the given artifacts in one query and
+// groups them by artifact ID.
+func (h *ArtifactHandler) batchFetchTypes(c *gin.Context, artifacts []db.RegistryArtifact) map[int64][]db.RegistryArtifactType {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(artifacts))
+	for i, a := range artifacts {
+		ids[i] = a.ID
+	}
+	rows, err := h.queries.ListArtifactTypesByArtifactIDs(c, ids)
+	if err != nil {
+		return nil
+	}
+	result := make(map[int64][]db.RegistryArtifactType)
+	for _, row := range rows {
+		t := db.RegistryArtifactType{
+			ID:          row.ID,
+			Name:        row.Name,
+			Description: row.Description,
+			CreatedAt:   row.CreatedAt,
+			UpdatedAt:   row.UpdatedAt,
+		}
+		result[row.ArtifactID] = append(result[row.ArtifactID], t)
+	}
+	return result
 }

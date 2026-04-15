@@ -41,7 +41,7 @@ func main() {
 		log.Fatalf("build storage: %v", err)
 	}
 
-	router := api.NewRouter(pool, queries, store, cfg.StorageBackend)
+	router := api.NewRouter(pool, queries, store, cfg.StorageBackend, cfg)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	log.Printf("starting fusion-index on %s", addr)

@@ -7,14 +7,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"fusion-platform/fusion-index/internal/api/handlers"
+	"fusion-platform/fusion-index/internal/api/middleware"
+	"fusion-platform/fusion-index/internal/api/openapi"
+	"fusion-platform/fusion-index/internal/config"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
 	"fusion-platform/fusion-index/internal/storage"
 )
 
-func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBackend string) *gin.Engine {
+func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBackend string, cfg *config.Config) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(corsMiddleware())
+
+	// OpenAPI spec + Swagger UI
+	r.GET("/api/openapi.json", openapi.ServeSpec)
+	r.GET("/swagger/", openapi.ServeUI)
 
 	// Health probes (same paths as Quarkus Smallrye Health)
 	r.GET("/q/health/live", func(c *gin.Context) {
@@ -28,41 +35,50 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 		c.JSON(http.StatusOK, gin.H{"status": "UP"})
 	})
 
-	th := handlers.NewTemplateHandler(pool, q)
-	jh := handlers.NewJobHandler(pool, q)
-	ah := handlers.NewArtifactHandler(pool, q, s, storageBackend)
+	ah := handlers.NewArtifactHandler(pool, q)
+	vh := handlers.NewVersionHandler(pool, q, s)
+	fh := handlers.NewFileHandler(pool, q, s, storageBackend)
+	th := handlers.NewTagHandler(pool, q)
+	tyh := handlers.NewTypeHandler(pool, q)
 
 	v1 := r.Group("/api/v1")
+	v1.Use(middleware.NewAuthMiddleware(cfg))
 
-	// Templates
-	v1.GET("/templates", th.List)
-	v1.POST("/templates", th.Create)
-	v1.GET("/templates/:id", th.Get)
-	v1.PUT("/templates/:id", th.Update)
-	v1.DELETE("/templates/:id", th.Delete)
-	v1.GET("/templates/:id/versions", th.ListVersions)
-	v1.POST("/templates/:id/versions", th.PublishVersion)
-	v1.GET("/templates/:id/versions/:versionNumber", th.GetVersion)
-
-	// Jobs
-	v1.GET("/jobs", jh.List)
-	v1.POST("/jobs", jh.Create)
-	v1.GET("/jobs/:id", jh.Get)
-	v1.PUT("/jobs/:id", jh.Update)
-	v1.DELETE("/jobs/:id", jh.Delete)
-	v1.GET("/jobs/:id/versions", jh.ListVersions)
-	v1.POST("/jobs/:id/versions", jh.PublishVersion)
-	v1.GET("/jobs/:id/versions/:versionNumber", jh.GetVersion)
-
-	// Artifacts scoped to job version
-	v1.GET("/jobs/:id/versions/:versionNumber/artifacts", ah.ListForJobVersion)
-	v1.POST("/jobs/:id/versions/:versionNumber/artifacts", ah.Upload)
-
-	// Artifacts by ID
-	v1.GET("/artifacts", ah.ListAll)
+	// Artifacts
+	v1.GET("/artifacts", ah.List)
+	v1.POST("/artifacts", ah.Create)
 	v1.GET("/artifacts/:id", ah.Get)
-	v1.GET("/artifacts/:id/download", ah.Download)
+	v1.PUT("/artifacts/:id", ah.Update)
 	v1.DELETE("/artifacts/:id", ah.Delete)
+
+	// Versions
+	v1.GET("/artifacts/:id/versions", vh.List)
+	v1.POST("/artifacts/:id/versions", vh.Create)
+	v1.GET("/artifacts/:id/versions/:semver", vh.Get)
+	v1.DELETE("/artifacts/:id/versions/:semver", vh.Delete)
+
+	// Tags
+	v1.PUT("/artifacts/:id/tags/:tag", th.Put)
+	v1.DELETE("/artifacts/:id/tags/:tag", th.Delete)
+
+	// Files
+	v1.GET("/artifacts/:id/versions/:semver/files", fh.List)
+	v1.POST("/artifacts/:id/versions/:semver/files", fh.Upload)
+	v1.GET("/artifacts/:id/versions/:semver/files/:fileId", fh.Get)
+	v1.GET("/artifacts/:id/versions/:semver/files/:fileId/download", fh.Download)
+	v1.DELETE("/artifacts/:id/versions/:semver/files/:fileId", fh.Delete)
+
+	// Types
+	v1.GET("/types", tyh.List)
+	v1.POST("/types", tyh.Create)
+	v1.GET("/types/:typeId", tyh.Get)
+	v1.PUT("/types/:typeId", tyh.Update)
+	v1.DELETE("/types/:typeId", tyh.Delete)
+
+	// Artifact type assignments
+	v1.GET("/artifacts/:id/types", tyh.ListForArtifact)
+	v1.PUT("/artifacts/:id/types/:typeId", tyh.Assign)
+	v1.DELETE("/artifacts/:id/types/:typeId", tyh.Unassign)
 
 	return r
 }

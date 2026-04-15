@@ -7,6 +7,13 @@ metadata:
     {{- include "fusion-index.labels" . | nindent 4 }}
     app: {{ include "fusion-index.backendServiceName" . }}
     component: backend
+    {{- with .Values.backend.deploymentLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.backend.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.backend.replicas }}
   selector:
@@ -25,6 +32,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      serviceAccountName: {{ include "fusion-index.backendServiceName" . }}
       {{- with .Values.backend.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

@@ -6,7 +6,6 @@ fusion-index has been deployed.
 Services:
   Backend API:  http://{{ include "fusion-index.backendServiceName" . }}.{{ .Values.namespace }}.svc.cluster.local:8080
 
-
 {{- if .Values.ingress.enabled }}
 
 Ingress:
@@ -14,10 +13,10 @@ Ingress:
 
   If using minikube, add the following to /etc/hosts:
     $(minikube ip)  {{ .Values.ingress.host }}
-{{- end }}
 
-API docs (once backend is running):
-  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/swagger-ui/
+API smoke-test:
+  curl -s http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/api/v1/artifacts | python3 -m json.tool
+{{- end }}
 
 {{- if .Values.postgresql.enabled }}
 
@@ -31,9 +30,15 @@ PostgreSQL (external):
   Host: {{ .Values.postgresql.external.host }}:{{ .Values.postgresql.external.port }}
 {{- end }}
 
+{{- if ne .Values.backend.storageBackend "FILESYSTEM" }}
+
 S3 artifact storage:
   Bucket:   {{ .Values.s3.bucket }}
   Region:   {{ .Values.s3.region }}
 {{- if .Values.s3.endpointOverride }}
   Endpoint: {{ .Values.s3.endpointOverride }}
+{{- end }}
+{{- else }}
+
+Artifact storage: FILESYSTEM ({{ .Values.backend.storageFSRoot | default "~/.fusion-index/artifacts" }})
 {{- end }}

@@ -8,9 +8,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type Artifact struct {
+type RegistryArtifact struct {
+	ID          int64              `json:"id"`
+	FullName    string             `json:"full_name"`
+	Description *string            `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type RegistryArtifactFile struct {
 	ID             int64              `json:"id"`
-	JobVersionID   int64              `json:"job_version_id"`
+	VersionID      int64              `json:"version_id"`
 	Name           string             `json:"name"`
 	ContentType    *string            `json:"content_type"`
 	SizeBytes      *int64             `json:"size_bytes"`
@@ -21,45 +29,36 @@ type Artifact struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
-type Job struct {
-	ID                  int64              `json:"id"`
-	Name                string             `json:"name"`
-	Description         *string            `json:"description"`
-	TemplateVersionID   int64              `json:"template_version_id"`
-	LatestVersionNumber int32              `json:"latest_version_number"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+type RegistryArtifactTag struct {
+	ID         int64              `json:"id"`
+	ArtifactID int64              `json:"artifact_id"`
+	Tag        string             `json:"tag"`
+	VersionID  int64              `json:"version_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
 }
 
-type JobTemplate struct {
-	ID                  int64              `json:"id"`
-	Name                string             `json:"name"`
-	Description         *string            `json:"description"`
-	DockerImage         string             `json:"docker_image"`
-	LatestVersionNumber int32              `json:"latest_version_number"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+type RegistryArtifactType struct {
+	ID          int64              `json:"id"`
+	Name        string             `json:"name"`
+	Description *string            `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
-type JobTemplateVersion struct {
-	ID               int64              `json:"id"`
-	TemplateID       int64              `json:"template_id"`
-	VersionNumber    int32              `json:"version_number"`
-	DockerImage      string             `json:"docker_image"`
-	DefaultRunConfig *string            `json:"default_run_config"`
-	Changelog        *string            `json:"changelog"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+type RegistryArtifactTypeMap struct {
+	ID         int64              `json:"id"`
+	ArtifactID int64              `json:"artifact_id"`
+	TypeID     int64              `json:"type_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
-type JobVersion struct {
-	ID                int64              `json:"id"`
-	JobID             int64              `json:"job_id"`
-	VersionNumber     int32              `json:"version_number"`
-	DockerImage       string             `json:"docker_image"`
-	GitUrl            string             `json:"git_url"`
-	GitRef            string             `json:"git_ref"`
-	GitSubpath        *string            `json:"git_subpath"`
-	RunConfig         *string            `json:"run_config"`
-	TemplateVersionID int64              `json:"template_version_id"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+type RegistryArtifactVersion struct {
+	ID         int64              `json:"id"`
+	ArtifactID int64              `json:"artifact_id"`
+	Major      int32              `json:"major"`
+	Minor      int32              `json:"minor"`
+	Patch      int32              `json:"patch"`
+	Config     *string            `json:"config"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }

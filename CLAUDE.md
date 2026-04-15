@@ -1,6 +1,6 @@
-# fusion-index — Index (Job Registry)
+# fusion-index — Artifact Registry
 
-Stores, indexes, and exposes Fusion job definitions via REST API.
+Stores, indexes, and exposes versioned artifacts via REST API. Artifacts use Python-style namespaced names (`org.team.name`), semver versions (`major.minor.patch`), per-version configurations, file uploads, and mutable tags.
 
 ## Tech Stack
 - **Language:** Go 1.25
@@ -14,20 +14,31 @@ Stores, indexes, and exposes Fusion job definitions via REST API.
 cmd/server/main.go              # entrypoint — config, pool, migrate, serve
 internal/
 ├── config/config.go            # env var loading
+├── semver/semver.go            # Parse("1.2.3") → Semver{Major,Minor,Patch}; used across handlers
 ├── db/
 │   ├── queries/                # hand-written SQL (sqlc input)
+│   │   ├── registry_artifacts.sql
+│   │   ├── registry_versions.sql
+│   │   ├── registry_files.sql
+│   │   └── registry_tags.sql
 │   └── sqlc/                   # generated Go — DO NOT EDIT
 ├── storage/
-│   ├── storage.go              # Storage interface
+│   ├── storage.go              # Storage interface (Store/Retrieve/Delete)
 │   ├── filesystem.go
 │   └── s3.go
 └── api/
     ├── router.go               # gin setup, routes, CORS
+    ├── openapi/
+    │   ├── handler.go          # //go:embed openapi.yaml; serves spec + Swagger UI
+    │   └── openapi.yaml        # hand-written OpenAPI 3.1 spec (all 18 ops)
+    ├── middleware/
+    │   └── auth.go             # Gin middleware: K8s SA token validation via TokenReview API
     ├── handlers/
-    │   ├── templates.go
-    │   ├── jobs.go
-    │   ├── artifacts.go
-    │   └── helpers.go          # shared path parsing, pagination, error helpers
+    │   ├── artifacts.go        # CRUD on registry_artifact
+    │   ├── versions.go         # CRUD on registry_artifact_version + tag-on-create
+    │   ├── files.go            # multipart upload / download / delete
+    │   ├── tags.go             # PUT/DELETE tags (upsert moves tag)
+    │   └── helpers.go          # pathID, pathFileID, pathSemver, isUniqueViolation, isNotFound
     └── dto/
         ├── requests.go         # binding-tagged request structs
         └── responses.go        # response structs + mapper functions
@@ -36,32 +47,46 @@ tests/integration/              # real-Postgres tests via testcontainers-go
 sqlc.yaml                       # sqlc config
 ```
 
+## DB Schema
+| Table | Key columns |
+|---|---|
+| `registry_artifact` | `id`, `full_name VARCHAR(500) UNIQUE`, `description TEXT` |
+| `registry_artifact_version` | `id`, `artifact_id FK`, `major/minor/patch INT`, `config TEXT`; UNIQUE `(artifact_id, major, minor, patch)` |
+| `registry_artifact_file` | `id`, `version_id FK`, `name`, `content_type`, `size_bytes`, `storage_backend`, `storage_path`, `status`; UNIQUE `(version_id, name)` |
+| `registry_artifact_tag` | `id`, `artifact_id FK`, `tag VARCHAR(255)`, `version_id FK`; UNIQUE `(artifact_id, tag)` |
+
 ## Key Conventions
+- **OpenAPI spec:** hand-written `internal/api/openapi/openapi.yaml` (OpenAPI 3.1); embedded via `//go:embed` and served as JSON. swaggo/swag does NOT support 3.1 — don't use it.
+- **`go:embed` rule:** `//go:embed` cannot use `../` paths — the file must be in the same directory or a subdirectory of the Go source file.
+- **yaml.v3 → JSON:** `yaml.v3` may return `map[any]any` for non-string-keyed maps; always call `normaliseYAML()` (in `internal/api/openapi/handler.go`) before `json.Marshal` to avoid a panic.
 - All DB access goes through `internal/db/sqlc` (generated). Never write raw pgx queries outside that layer.
-- sqlc timestamp override for `pg_catalog.timestamptz → time.Time` does NOT apply; sqlc generates `pgtype.Timestamptz`. Always access `.Time` in response mappers.
-- golang-migrate uses `lib/pq` internally (not pgx). Append `?sslmode=disable` to DBURL or migrations fail against Bitnami Postgres (no TLS in dev).
+- sqlc generates `pgtype.Timestamptz`. Always access `.Time` in response mappers — the sqlc.yaml `timestamptz → time.Time` override does NOT take effect with pgx/v5.
+- golang-migrate uses `lib/pq` internally (not pgx). Append `?sslmode=disable` to DBURL or migrations fail.
 - Regenerate after SQL changes: `~/go/bin/sqlc generate`
-- Transactions are opened in handlers that need atomicity (create + version bump). Pass `q.WithTx(tx)` to queries.
-- Nullable columns from sqlc become `*string` / `*int64` (`emit_pointers_for_null_types: true`). Timestamps are `pgtype.Timestamptz`; access `.Time` for `time.Time`.
+- Transactions via `q.WithTx(tx)` for atomic operations (version create + tag upsert, artifact create + name check, etc.).
+- Nullable columns from sqlc become `*string` / `*int64` (`emit_pointers_for_null_types: true`).
 - Error responses always have shape `{"error": "..."}`.
+- **409 on unique violation:** `errors.As(err, &pgErr) && pgErr.Code == "23505"` using `*pgconn.PgError` — used for duplicate version, duplicate artifact name, duplicate filename.
+- **Storage paths:** `{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}` — including the DB file ID prevents collisions when the same filename is uploaded twice.
+- **Tag upsert:** `ON CONFLICT (artifact_id, tag) DO UPDATE SET version_id = EXCLUDED.version_id` — atomically moves a tag to a new version; no application-level conflict check needed.
+- **Two-phase file upload:** create DB row (status=PENDING) → `storage.Store` → `UpdateArtifactFileStored` (status=AVAILABLE). On storage error: mark ERROR. On DB update error: mark ERROR + `storage.Delete` to avoid orphans.
 
 ## REST API (validated)
 
 | Method | Path | Description |
 |---|---|---|
-| GET/POST | `/api/v1/templates` | List / create job templates |
-| GET/PUT/DELETE | `/api/v1/templates/{id}` | Get / update / delete template |
-| GET/POST | `/api/v1/templates/{id}/versions` | List / publish template version |
-| GET | `/api/v1/templates/{id}/versions/{n}` | Get specific template version |
-| GET/POST | `/api/v1/jobs` | List / create jobs |
-| GET/PUT/DELETE | `/api/v1/jobs/{id}` | Get / update / delete job |
-| GET/POST | `/api/v1/jobs/{id}/versions` | List / publish job version |
-| GET | `/api/v1/jobs/{id}/versions/{n}` | Get specific job version |
-| GET/POST | `/api/v1/jobs/{jobId}/versions/{n}/artifacts` | List / upload artifact |
-| GET | `/api/v1/artifacts` | List all artifacts (paginated, sorted by createdAt DESC) |
-| GET/DELETE | `/api/v1/artifacts/{id}` | Get metadata / delete artifact |
-| GET | `/api/v1/artifacts/{id}/download` | Download artifact stream |
+| GET/POST | `/api/v1/artifacts` | List (filter `?name=` prefix, `?tag=`) / create |
+| GET/PUT/DELETE | `/api/v1/artifacts/{id}` | Get / update description / delete artifact |
+| GET/POST | `/api/v1/artifacts/{id}/versions` | List / create version (body: `version`, `config`, `tags[]`) |
+| GET/DELETE | `/api/v1/artifacts/{id}/versions/{semver}` | Get / delete version |
+| PUT/DELETE | `/api/v1/artifacts/{id}/tags/{tag}` | Assign (`{"version":"1.2.3"}`) / delete tag |
+| GET/POST | `/api/v1/artifacts/{id}/versions/{semver}/files` | List / upload file (multipart) |
+| GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | File metadata |
+| GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}/download` | Download stream |
+| DELETE | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | Delete file |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
+| GET | `/api/openapi.json` | OpenAPI 3.1 spec as JSON |
+| GET | `/swagger/` | Swagger UI (assets from CDN, HTML embedded in binary) |
 
 ## Environment Variables
 
@@ -79,6 +104,9 @@ sqlc.yaml                       # sqlc config
 | `S3_BUCKET` | `fusion-index-artifacts` | S3 bucket name |
 | `AWS_REGION` | `us-east-1` | AWS region |
 | `S3_ENDPOINT_OVERRIDE` | _(empty)_ | Custom S3 endpoint (MinIO etc.) |
+| `AUTH_ENABLED` | `false` | `true` to enable K8s SA token validation |
+| `AUTH_AUDIENCE` | _(empty)_ | If set, token audience is validated (recommended: `fusion-index`) |
+| `AUTH_ALLOWED_SA` | _(empty)_ | Comma-separated `namespace/name` allowlist; empty = any valid SA |
 
 ## Local Testing
 
@@ -102,6 +130,24 @@ helm upgrade --install fusion-index deployment/ \
 - After rebuilding: `kubectl rollout restart deployment/fusion-index-backend -n fusion`
 - Port-forward: `kubectl port-forward -n fusion service/fusion-index-backend 18080:8080 --address 127.0.0.1`
 - Smoke-test: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
+
+## Authentication
+- **K8s SA token auth:** `internal/api/middleware/auth.go` — calls `POST /apis/authentication.k8s.io/v1/tokenreviews` directly via `net/http` (no client-go). Uses in-cluster CA (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`) and own SA token.
+- **SA token re-read per request** — kubelet rotates projected tokens; always `os.ReadFile(saTokenPath)` fresh, never cache.
+- **Username format:** K8s returns `system:serviceaccount:<namespace>:<name>`; allowlist entries use `namespace/name` (converted by `saFromUsername`).
+- **Protected scope:** auth middleware applied to `/api/v1` group only — `/q/health/*`, `/api/openapi.json`, `/swagger/` are always public.
+- **Disabled locally:** `AUTH_ENABLED=false` (default) makes middleware a no-op; safe for local dev outside cluster.
+
+## Helm — Authentication
+`auth.enabled` / `auth.audience` / `auth.allowedServiceAccounts` in `values.yaml`.
+When `auth.enabled: true` a `ClusterRole` + `ClusterRoleBinding` granting `tokenreviews/create` are created automatically. The backend `ServiceAccount` is always created regardless of auth setting.
+
+## Helm — Configurable Pod/Container Metadata
+All six knobs live under `backend.*` in `values.yaml`:
+- `deploymentLabels`, `deploymentAnnotations` — Deployment object metadata (GitOps, ArgoCD sync-wave, etc.)
+- `podLabels`, `podAnnotations` — Pod template (Prometheus scraping, cost labels, etc.)
+- `podSecurityContext` — pod-level (`runAsNonRoot`, `fsGroup`)
+- `containerSecurityContext` — container-level (`allowPrivilegeEscalation`, `readOnlyRootFilesystem`, `capabilities`)
 
 ## Branch Strategy
 `main` → `develop` → `feature/*`

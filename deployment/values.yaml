@@ -40,14 +40,30 @@ backend:
   # Use "require" or "verify-full" when PostgreSQL has TLS enabled (production).
   dbSSLMode: disable
 
-  # Optional extra annotations added to every pod created by this Deployment.
+  # Extra labels added to the Deployment object metadata (not pods).
+  # Useful for GitOps tooling, cost allocation, or policy selectors.
+  # Example:
+  #   deploymentLabels:
+  #     team: platform
+  #     managed-by: argocd
+  deploymentLabels: {}
+
+  # Extra annotations added to the Deployment object metadata (not pods).
+  # Useful for ArgoCD sync-wave, Flux, or other controllers that read Deployment annotations.
+  # Example:
+  #   deploymentAnnotations:
+  #     argocd.argoproj.io/sync-wave: "2"
+  #     link.argocd.argoproj.io/external-link: "http://index.fusion.local"
+  deploymentAnnotations: {}
+
+  # Extra annotations added to every pod created by this Deployment.
   # Example:
   #   podAnnotations:
   #     prometheus.io/scrape: "true"
   #     prometheus.io/port: "8080"
   podAnnotations: {}
 
-  # Optional extra labels added to every pod created by this Deployment.
+  # Extra labels added to every pod created by this Deployment.
   # Example:
   #   podLabels:
   #     team: platform
@@ -77,6 +93,30 @@ backend:
     minReplicas: 1
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
+
+# -----------------------------------------------------------------------------
+# Authentication — Kubernetes service account token validation
+#
+# When enabled the backend calls the cluster TokenReview API to validate every
+# request to /api/v1/**. Health probes and OpenAPI endpoints are always public.
+#
+# Requires the pod to have RBAC permission to create tokenreviews
+# (provisioned automatically when auth.enabled: true).
+# -----------------------------------------------------------------------------
+auth:
+  enabled: false
+
+  # If non-empty, the token must have been issued for this audience.
+  # Recommended: set to the service name (e.g. "fusion-index").
+  audience: ""
+
+  # Whitelist of service accounts allowed to call the API.
+  # Format: "namespace/name". Empty list = any valid SA token is accepted.
+  # Example:
+  #   allowedServiceAccounts:
+  #     - fusion/fusion-spectra
+  #     - fusion/ci-runner
+  allowedServiceAccounts: []
 
 # -----------------------------------------------------------------------------
 # PostgreSQL — Bitnami subchart (bundled) or external

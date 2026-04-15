@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
@@ -19,6 +20,11 @@ type Config struct {
 	S3Bucket           string
 	AWSRegion          string
 	S3EndpointOverride string
+
+	// Kubernetes SA token authentication
+	AuthEnabled    bool
+	AuthAudience   string   // if non-empty, validated against token audience claim
+	AuthAllowedSAs []string // "namespace/name" pairs; empty = allow any valid SA token
 }
 
 func Load() *Config {
@@ -36,6 +42,9 @@ func Load() *Config {
 		S3Bucket:           getEnv("S3_BUCKET", "fusion-index-artifacts"),
 		AWSRegion:          getEnv("AWS_REGION", "us-east-1"),
 		S3EndpointOverride: getEnv("S3_ENDPOINT_OVERRIDE", ""),
+		AuthEnabled:        getEnv("AUTH_ENABLED", "false") == "true",
+		AuthAudience:       getEnv("AUTH_AUDIENCE", ""),
+		AuthAllowedSAs:     splitCSV(getEnv("AUTH_ALLOWED_SA", "")),
 	}
 }
 
@@ -49,4 +58,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

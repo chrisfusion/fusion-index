@@ -18,6 +18,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"fusion-platform/fusion-index/internal/api"
+	"fusion-platform/fusion-index/internal/config"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
 	"fusion-platform/fusion-index/internal/storage"
 )
@@ -81,7 +82,7 @@ func TestMain(m *testing.M) {
 	queries := db.New(pool)
 	store := storage.NewFilesystemStorage(artifactDir)
 
-	router := api.NewRouter(pool, queries, store, "FILESYSTEM")
+	router := api.NewRouter(pool, queries, store, "FILESYSTEM", &config.Config{})
 	testServer = httptest.NewServer(router)
 	defer testServer.Close()
 

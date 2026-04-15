@@ -5,6 +5,7 @@ import (
 	"time"
 
 	db "fusion-platform/fusion-index/internal/db/sqlc"
+	"fusion-platform/fusion-index/internal/semver"
 )
 
 // ---- Pagination ----
@@ -16,59 +17,57 @@ type PageResponse[T any] struct {
 	PageSize int   `json:"pageSize"`
 }
 
-// ---- Templates ----
+// ---- Types ----
 
-type TemplateResponse struct {
-	ID                  int64   `json:"id"`
-	Name                string  `json:"name"`
-	Description         *string `json:"description"`
-	DockerImage         string  `json:"dockerImage"`
-	LatestVersionNumber int32   `json:"latestVersionNumber"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-}
-
-type TemplateVersionResponse struct {
-	ID               int64     `json:"id"`
-	TemplateID       int64     `json:"templateId"`
-	VersionNumber    int32     `json:"versionNumber"`
-	DockerImage      string    `json:"dockerImage"`
-	DefaultRunConfig *string   `json:"defaultRunConfig"`
-	Changelog        *string   `json:"changelog"`
-	CreatedAt        time.Time `json:"createdAt"`
-}
-
-// ---- Jobs ----
-
-type JobResponse struct {
-	ID                  int64     `json:"id"`
-	Name                string    `json:"name"`
-	Description         *string   `json:"description"`
-	TemplateVersionID   int64     `json:"templateVersionId"`
-	LatestVersionNumber int32     `json:"latestVersionNumber"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-}
-
-type JobVersionResponse struct {
-	ID                int64     `json:"id"`
-	JobID             int64     `json:"jobId"`
-	VersionNumber     int32     `json:"versionNumber"`
-	DockerImage       string    `json:"dockerImage"`
-	GitURL            string    `json:"gitUrl"`
-	GitRef            string    `json:"gitRef"`
-	GitSubpath        *string   `json:"gitSubpath"`
-	RunConfig         *string   `json:"runConfig"`
-	TemplateVersionID int64     `json:"templateVersionId"`
-	ArtifactCount     int64     `json:"artifactCount"`
-	CreatedAt         time.Time `json:"createdAt"`
+type TypeResponse struct {
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // ---- Artifacts ----
 
 type ArtifactResponse struct {
+	ID          int64          `json:"id"`
+	FullName    string         `json:"fullName"`
+	Description *string        `json:"description"`
+	Types       []TypeResponse `json:"types"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
+}
+
+// ---- Versions ----
+
+type VersionResponse struct {
+	ID         int64         `json:"id"`
+	ArtifactID int64         `json:"artifactId"`
+	Version    string        `json:"version"`
+	Major      int32         `json:"major"`
+	Minor      int32         `json:"minor"`
+	Patch      int32         `json:"patch"`
+	Config     *string       `json:"config"`
+	Tags       []TagResponse `json:"tags"`
+	CreatedAt  time.Time     `json:"createdAt"`
+}
+
+// ---- Tags ----
+
+type TagResponse struct {
+	ID         int64     `json:"id"`
+	ArtifactID int64     `json:"artifactId"`
+	Tag        string    `json:"tag"`
+	VersionID  int64     `json:"versionId"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// ---- Files ----
+
+type FileResponse struct {
 	ID             int64     `json:"id"`
-	JobVersionID   int64     `json:"jobVersionId"`
+	VersionID      int64     `json:"versionId"`
 	Name           string    `json:"name"`
 	ContentType    *string   `json:"contentType"`
 	SizeBytes      *int64    `json:"sizeBytes"`
@@ -81,69 +80,72 @@ type ArtifactResponse struct {
 
 // ---- Mappers ----
 
-func ToTemplateResponse(t db.JobTemplate) TemplateResponse {
-	return TemplateResponse{
-		ID:                  t.ID,
-		Name:                t.Name,
-		Description:         t.Description,
-		DockerImage:         t.DockerImage,
-		LatestVersionNumber: t.LatestVersionNumber,
-		CreatedAt:           t.CreatedAt.Time,
-		UpdatedAt:           t.UpdatedAt.Time,
+func ToTypeResponse(t db.RegistryArtifactType) TypeResponse {
+	return TypeResponse{
+		ID:          t.ID,
+		Name:        t.Name,
+		Description: t.Description,
+		CreatedAt:   t.CreatedAt.Time,
+		UpdatedAt:   t.UpdatedAt.Time,
 	}
 }
 
-func ToTemplateVersionResponse(v db.JobTemplateVersion) TemplateVersionResponse {
-	return TemplateVersionResponse{
-		ID:               v.ID,
-		TemplateID:       v.TemplateID,
-		VersionNumber:    v.VersionNumber,
-		DockerImage:      v.DockerImage,
-		DefaultRunConfig: v.DefaultRunConfig,
-		Changelog:        v.Changelog,
-		CreatedAt:        v.CreatedAt.Time,
+func ToArtifactResponse(a db.RegistryArtifact, types []db.RegistryArtifactType) ArtifactResponse {
+	typeResps := make([]TypeResponse, len(types))
+	for i, t := range types {
+		typeResps[i] = ToTypeResponse(t)
 	}
-}
-
-func ToJobResponse(j db.Job) JobResponse {
-	return JobResponse{
-		ID:                  j.ID,
-		Name:                j.Name,
-		Description:         j.Description,
-		TemplateVersionID:   j.TemplateVersionID,
-		LatestVersionNumber: j.LatestVersionNumber,
-		CreatedAt:           j.CreatedAt.Time,
-		UpdatedAt:           j.UpdatedAt.Time,
-	}
-}
-
-func ToJobVersionResponse(v db.JobVersion, artifactCount int64) JobVersionResponse {
-	return JobVersionResponse{
-		ID:                v.ID,
-		JobID:             v.JobID,
-		VersionNumber:     v.VersionNumber,
-		DockerImage:       v.DockerImage,
-		GitURL:            v.GitUrl,
-		GitRef:            v.GitRef,
-		GitSubpath:        v.GitSubpath,
-		RunConfig:         v.RunConfig,
-		TemplateVersionID: v.TemplateVersionID,
-		ArtifactCount:     artifactCount,
-		CreatedAt:         v.CreatedAt.Time,
-	}
-}
-
-func ToArtifactResponse(a db.Artifact) ArtifactResponse {
 	return ArtifactResponse{
-		ID:             a.ID,
-		JobVersionID:   a.JobVersionID,
-		Name:           a.Name,
-		ContentType:    a.ContentType,
-		SizeBytes:      a.SizeBytes,
-		StorageBackend: a.StorageBackend,
-		Status:         a.Status,
-		DownloadURL:    fmt.Sprintf("/api/v1/artifacts/%d/download", a.ID),
-		CreatedAt:      a.CreatedAt.Time,
-		UpdatedAt:      a.UpdatedAt.Time,
+		ID:          a.ID,
+		FullName:    a.FullName,
+		Description: a.Description,
+		Types:       typeResps,
+		CreatedAt:   a.CreatedAt.Time,
+		UpdatedAt:   a.UpdatedAt.Time,
+	}
+}
+
+func ToVersionResponse(v db.RegistryArtifactVersion, tags []db.RegistryArtifactTag) VersionResponse {
+	tagResps := make([]TagResponse, len(tags))
+	for i, t := range tags {
+		tagResps[i] = ToTagResponse(t)
+	}
+	sv := semver.Semver{Major: v.Major, Minor: v.Minor, Patch: v.Patch}
+	return VersionResponse{
+		ID:         v.ID,
+		ArtifactID: v.ArtifactID,
+		Version:    sv.String(),
+		Major:      v.Major,
+		Minor:      v.Minor,
+		Patch:      v.Patch,
+		Config:     v.Config,
+		Tags:       tagResps,
+		CreatedAt:  v.CreatedAt.Time,
+	}
+}
+
+func ToTagResponse(t db.RegistryArtifactTag) TagResponse {
+	return TagResponse{
+		ID:         t.ID,
+		ArtifactID: t.ArtifactID,
+		Tag:        t.Tag,
+		VersionID:  t.VersionID,
+		CreatedAt:  t.CreatedAt.Time,
+		UpdatedAt:  t.UpdatedAt.Time,
+	}
+}
+
+func ToFileResponse(f db.RegistryArtifactFile, artifactID int64, sv semver.Semver) FileResponse {
+	return FileResponse{
+		ID:             f.ID,
+		VersionID:      f.VersionID,
+		Name:           f.Name,
+		ContentType:    f.ContentType,
+		SizeBytes:      f.SizeBytes,
+		StorageBackend: f.StorageBackend,
+		Status:         f.Status,
+		DownloadURL:    fmt.Sprintf("/api/v1/artifacts/%d/versions/%s/files/%d/download", artifactID, sv.String(), f.ID),
+		CreatedAt:      f.CreatedAt.Time,
+		UpdatedAt:      f.UpdatedAt.Time,
 	}
 }
