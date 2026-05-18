@@ -6,7 +6,11 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "fusion-index.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- $ingressAnno := merge (dict) (.Values.ingress.annotations | default dict) }}
+  {{- if .Values.ingress.proxyBodySize }}
+  {{- $_ := set $ingressAnno "nginx.ingress.kubernetes.io/proxy-body-size" .Values.ingress.proxyBodySize }}
+  {{- end }}
+  {{- with $ingressAnno }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

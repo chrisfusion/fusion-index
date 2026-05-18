@@ -27,7 +27,11 @@ spec:
         {{- with .Values.backend.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.backend.podAnnotations }}
+      {{- $podAnno := merge (dict) (.Values.backend.podAnnotations | default dict) }}
+      {{- if .Values.linkerd.opaquePorts }}
+      {{- $_ := set $podAnno "config.linkerd.io/opaque-ports" .Values.linkerd.opaquePorts }}
+      {{- end }}
+      {{- with $podAnno }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

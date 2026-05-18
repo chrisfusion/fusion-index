@@ -7,6 +7,14 @@ metadata:
     {{- include "fusion-index.labels" . | nindent 4 }}
     app: {{ include "fusion-index.backendServiceName" . }}
     component: backend
+  {{- $svcAnno := merge (dict) (.Values.backend.serviceAnnotations | default dict) }}
+  {{- if .Values.linkerd.opaquePorts }}
+  {{- $_ := set $svcAnno "config.linkerd.io/opaque-ports" .Values.linkerd.opaquePorts }}
+  {{- end }}
+  {{- with $svcAnno }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: ClusterIP
   selector:

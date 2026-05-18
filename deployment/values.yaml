@@ -56,6 +56,12 @@ backend:
   #     link.argocd.argoproj.io/external-link: "http://index.fusion.local"
   deploymentAnnotations: {}
 
+  # Extra annotations added to the Service object.
+  # Example:
+  #   serviceAnnotations:
+  #     service.beta.kubernetes.io/aws-load-balancer-type: nlb
+  serviceAnnotations: {}
+
   # Extra annotations added to every pod created by this Deployment.
   # Example:
   #   podAnnotations:
@@ -170,14 +176,31 @@ s3:
   secretAccessKey: ""
 
 # -----------------------------------------------------------------------------
+# Linkerd service mesh integration
+#
+# opaquePorts: comma-separated port list to mark as opaque TCP in Linkerd.
+# Opaque ports bypass Linkerd's L7 HTTP/2 translation and use a raw mTLS TCP
+# tunnel instead — required when Linkerd is installed and large multipart uploads
+# (venv tar.gz from forge, GUI uploads via BFF) fail silently or with truncated
+# body errors. Applied to both the Service and Pod annotations so the fix covers
+# both fully-meshed (BFF→index) and half-meshed (builder Job→index) traffic.
+# Set to "" (empty) when Linkerd is not installed.
+# -----------------------------------------------------------------------------
+linkerd:
+  opaquePorts: ""   # e.g. "8080"
+
+# -----------------------------------------------------------------------------
 # Ingress
 # -----------------------------------------------------------------------------
 ingress:
   enabled: true
   className: nginx
   host: index.fusion.local
+  # proxyBodySize: Nginx client_max_body_size for this Ingress.
+  # Default Nginx value is 1m — set explicitly for large artifact uploads.
+  # Set to "0" for unlimited. Rendered as nginx.ingress.kubernetes.io/proxy-body-size.
+  proxyBodySize: "100m"
   annotations: {}
-    # nginx.ingress.kubernetes.io/proxy-body-size: "100m"  # for large artifact uploads
   tls:
     enabled: false
     secretName: fusion-index-tls
