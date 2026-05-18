@@ -143,11 +143,23 @@ helm upgrade --install fusion-index deployment/ \
 When `auth.enabled: true` a `ClusterRole` + `ClusterRoleBinding` granting `tokenreviews/create` are created automatically. The backend `ServiceAccount` is always created regardless of auth setting.
 
 ## Helm — Configurable Pod/Container Metadata
-All six knobs live under `backend.*` in `values.yaml`:
+All knobs live under `backend.*` in `values.yaml`:
 - `deploymentLabels`, `deploymentAnnotations` — Deployment object metadata (GitOps, ArgoCD sync-wave, etc.)
 - `podLabels`, `podAnnotations` — Pod template (Prometheus scraping, cost labels, etc.)
+- `serviceAnnotations` — Service object (e.g. cloud LB type, Linkerd opaque-ports)
 - `podSecurityContext` — pod-level (`runAsNonRoot`, `fsGroup`)
 - `containerSecurityContext` — container-level (`allowPrivilegeEscalation`, `readOnlyRootFilesystem`, `capabilities`)
+
+## Helm — Linkerd Integration
+`linkerd.opaquePorts` in `values.yaml` — comma-separated list of ports to mark as opaque TCP in Linkerd (e.g. `"8080"`). When set, adds `config.linkerd.io/opaque-ports` to both the Service and Pod annotations so Linkerd bypasses its L7 HTTP/2 proxy and uses a raw mTLS TCP tunnel instead.
+
+**Why this matters:** Linkerd's L7 proxy translates HTTP/1.1 → HTTP/2, which breaks large multipart uploads (`Content-Length` mismatch / flow-control stall). Setting opaque ports fixes silent upload failures for files >~2 MB without losing mTLS or Linkerd observability. Set to `""` (default) when Linkerd is not installed.
+
+## Helm — Ingress Body Size
+`ingress.proxyBodySize` in `values.yaml` — sets `nginx.ingress.kubernetes.io/proxy-body-size`. Defaults to `"100m"`. The Nginx default is `1m`, which silently rejects large artifact uploads with HTTP 413. Set to `"0"` for unlimited. Merged with `ingress.annotations`; explicit annotations take precedence for the same key.
+
+## Changelog
+Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the work is considered done. Follow the existing format: add an entry under `## [Unreleased]` or create a new `## [x.y.z] — YYYY-MM-DD` section.
 
 ## Branch Strategy
 `main` → `develop` → `feature/*`
