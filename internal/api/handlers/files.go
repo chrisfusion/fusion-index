@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"fusion-platform/fusion-index/internal/api/dto"
+	"fusion-platform/fusion-index/internal/api/middleware"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
 	"fusion-platform/fusion-index/internal/semver"
 	"fusion-platform/fusion-index/internal/storage"
@@ -99,7 +100,8 @@ func (h *FileHandler) Upload(c *gin.Context) {
 			conflictError(c, fmt.Sprintf("file %q already exists in this version", header.Filename))
 			return
 		}
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("create file record", "artifact_id", artifactID, "version", sv.String(), "filename", header.Filename, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -111,7 +113,8 @@ func (h *FileHandler) Upload(c *gin.Context) {
 			ID:     record.ID,
 			Status: "ERROR",
 		})
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("store file", "artifact_id", artifactID, "version", sv.String(), "filename", header.Filename, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -128,7 +131,8 @@ func (h *FileHandler) Upload(c *gin.Context) {
 			Status: "ERROR",
 		})
 		_ = h.storage.Delete(resolvedPath)
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("finalize file upload", "artifact_id", artifactID, "version", sv.String(), "filename", header.Filename, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, dto.ToFileResponse(updated, artifactID, sv))
@@ -212,7 +216,9 @@ func (h *FileHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return
 	}
-	_ = h.storage.Delete(f.StoragePath) // best-effort
+	if err := h.storage.Delete(f.StoragePath); err != nil { // best-effort
+		middleware.LoggerFromCtx(c).Warn("delete file from storage", "path", f.StoragePath, "error", err)
+	}
 	if err := h.queries.DeleteArtifactFile(c, fileID); err != nil {
 		internalError(c, err)
 		return

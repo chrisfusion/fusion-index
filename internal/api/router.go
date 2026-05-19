@@ -17,6 +17,7 @@ import (
 func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBackend string, cfg *config.Config) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(middleware.NewLoggingMiddleware())
 	r.Use(corsMiddleware())
 
 	// OpenAPI spec + Swagger UI

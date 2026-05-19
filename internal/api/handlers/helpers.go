@@ -9,10 +9,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"fusion-platform/fusion-index/internal/api/middleware"
 	"fusion-platform/fusion-index/internal/semver"
 )
 
 func internalError(c *gin.Context, err error) {
+	middleware.LoggerFromCtx(c).Error("internal error", "error", err)
 	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 }
 

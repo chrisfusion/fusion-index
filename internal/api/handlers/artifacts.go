@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"fusion-platform/fusion-index/internal/api/dto"
+	"fusion-platform/fusion-index/internal/api/middleware"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
 )
 
@@ -111,7 +112,8 @@ func (h *ArtifactHandler) Create(c *gin.Context) {
 		return
 	}
 	if !isNotFound(err) {
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("check artifact name", "name", req.FullName, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -120,11 +122,13 @@ func (h *ArtifactHandler) Create(c *gin.Context) {
 		Description: req.Description,
 	})
 	if err != nil {
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("create artifact", "name", req.FullName, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if err := tx.Commit(c); err != nil {
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("commit create artifact", "name", req.FullName, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, dto.ToArtifactResponse(a, nil))
@@ -202,6 +206,7 @@ func (h *ArtifactHandler) batchFetchTypes(c *gin.Context, artifacts []db.Registr
 	}
 	rows, err := h.queries.ListArtifactTypesByArtifactIDs(c, ids)
 	if err != nil {
+		middleware.LoggerFromCtx(c).Warn("fetch types for artifacts", "error", err)
 		return nil
 	}
 	result := make(map[int64][]db.RegistryArtifactType)

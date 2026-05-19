@@ -19,6 +19,8 @@ data:
   S3_ENDPOINT_OVERRIDE: {{ .Values.s3.endpointOverride | default "" | quote }}
   {{- end }}
   GIN_MODE:             {{ .Values.backend.ginMode | default "release" | quote }}
+  LOG_LEVEL:            {{ .Values.backend.logLevel | default "info" | quote }}
+  LOG_FORMAT:           {{ .Values.backend.logFormat | default "json" | quote }}
   AUTH_ENABLED:         {{ .Values.auth.enabled | toString | quote }}
   AUTH_AUDIENCE:        {{ .Values.auth.audience | default "" | quote }}
   AUTH_ALLOWED_SA:      {{ .Values.auth.allowedServiceAccounts | join "," | quote }}

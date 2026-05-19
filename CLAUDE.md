@@ -158,6 +158,17 @@ All knobs live under `backend.*` in `values.yaml`:
 ## Helm — Ingress Body Size
 `ingress.proxyBodySize` in `values.yaml` — sets `nginx.ingress.kubernetes.io/proxy-body-size`. Defaults to `"100m"`. The Nginx default is `1m`, which silently rejects large artifact uploads with HTTP 413. Set to `"0"` for unlimited. Merged with `ingress.annotations`; explicit annotations take precedence for the same key.
 
+## Logging
+
+Platform-wide logging spec: `../logging_principles.md` (applies to this service).
+Reference implementations: `../fusion-forge/internal/api/middleware/logging.go`, `../fusion-flux/internal/apiserver/middleware/logging.go`.
+
+- `log/slog` only — no `import "log"` anywhere
+- `LOG_LEVEL` / `LOG_FORMAT` env vars (wired through Helm ConfigMap)
+- Per-request logger injected by `middleware.NewLoggingMiddleware()`; retrieve with `middleware.LoggerFromCtx(c)` in handlers
+- `internalError` logs before writing the 500 response — don't also call `LoggerFromCtx` at the same call site (double-log)
+- Add structured context fields (`name`, `artifact_id`, `version`, `filename`) at key mutation error paths; plain `internalError` is fine for simple lookups
+
 ## Changelog
 Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the work is considered done. Follow the existing format: add an entry under `## [Unreleased]` or create a new `## [x.y.z] — YYYY-MM-DD` section.
 

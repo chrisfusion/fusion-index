@@ -25,6 +25,9 @@ type Config struct {
 	AuthEnabled    bool
 	AuthAudience   string   // if non-empty, validated against token audience claim
 	AuthAllowedSAs []string // "namespace/name" pairs; empty = allow any valid SA token
+
+	LogLevel  string // "debug" | "info" | "warn" | "error"
+	LogFormat string // "json" | "text"
 }
 
 func Load() *Config {
@@ -45,6 +48,8 @@ func Load() *Config {
 		AuthEnabled:        getEnv("AUTH_ENABLED", "false") == "true",
 		AuthAudience:       getEnv("AUTH_AUDIENCE", ""),
 		AuthAllowedSAs:     splitCSV(getEnv("AUTH_ALLOWED_SA", "")),
+		LogLevel:           getEnv("LOG_LEVEL", "info"),
+		LogFormat:          getEnv("LOG_FORMAT", "json"),
 	}
 }
 

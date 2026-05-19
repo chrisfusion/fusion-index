@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Structured logging via `log/slog` (Go standard library) following fusion-platform logging principles
+  - `LOG_LEVEL` env var (`debug` | `info` | `warn` | `error`, default `info`)
+  - `LOG_FORMAT` env var (`json` | `text`, default `json` — JSON for k8s log collectors, text for local dev)
+  - Per-request logging middleware (`internal/api/middleware/logging.go`): generates a `request_id`, attaches `{method, path, client_ip}` to every log line, emits one access log entry (status + latency_ms) after each handler
+  - `LoggerFromCtx(c)` helper for propagating the per-request logger into handlers
+  - `internalError` now logs `slog.Error("internal error", "error", err)` before writing the 500 response
+  - Key mutation handlers (`Create artifact`, `Create version`, `Upload file`) attach structured context fields (`name`, `artifact_id`, `version`, `filename`) to error log entries
+  - Best-effort storage cleanup failures (`Delete file`, `Delete version`) emit `slog.Warn`
+  - Startup sequence uses `slog.Info`/`slog.Error`; `log.Fatal`/`log.Printf` removed
+  - Helm: `backend.logLevel` and `backend.logFormat` in `values.yaml`; `LOG_LEVEL` and `LOG_FORMAT` added to the backend ConfigMap
+
 ---
 
 ## [0.1.1] — 2026-05-18

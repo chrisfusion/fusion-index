@@ -36,6 +36,11 @@ backend:
   # ginMode: release | debug | test — maps to GIN_MODE env var
   ginMode: release
 
+  # logLevel: debug | info | warn | error — maps to LOG_LEVEL
+  logLevel: "info"
+  # logFormat: json | text — maps to LOG_FORMAT (json for k8s log collectors, text for local dev)
+  logFormat: "json"
+
   # dbSSLMode: disable | require | verify-full — maps to DB_SSLMODE
   # Use "require" or "verify-full" when PostgreSQL has TLS enabled (production).
   dbSSLMode: disable

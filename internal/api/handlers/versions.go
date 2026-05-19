@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"fusion-platform/fusion-index/internal/api/dto"
+	"fusion-platform/fusion-index/internal/api/middleware"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
 	"fusion-platform/fusion-index/internal/semver"
 	"fusion-platform/fusion-index/internal/storage"
@@ -98,7 +99,8 @@ func (h *VersionHandler) Create(c *gin.Context) {
 			conflictError(c, fmt.Sprintf("version %s already exists for this artifact", sv.String()))
 			return
 		}
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("create version", "artifact_id", artifactID, "version", sv.String(), "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -110,14 +112,16 @@ func (h *VersionHandler) Create(c *gin.Context) {
 			VersionID:  version.ID,
 		})
 		if err != nil {
-			internalError(c, err)
+			middleware.LoggerFromCtx(c).Error("upsert tag on create version", "artifact_id", artifactID, "version", sv.String(), "tag", tag, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		tagRows = append(tagRows, t)
 	}
 
 	if err := tx.Commit(c); err != nil {
-		internalError(c, err)
+		middleware.LoggerFromCtx(c).Error("commit create version", "artifact_id", artifactID, "version", sv.String(), "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -178,7 +182,9 @@ func (h *VersionHandler) Delete(c *gin.Context) {
 	files, err := h.queries.ListArtifactFiles(c, version.ID)
 	if err == nil {
 		for _, f := range files {
-			_ = h.storage.Delete(f.StoragePath)
+			if err := h.storage.Delete(f.StoragePath); err != nil {
+				middleware.LoggerFromCtx(c).Warn("delete file from storage on version delete", "path", f.StoragePath, "error", err)
+			}
 		}
 	}
 
