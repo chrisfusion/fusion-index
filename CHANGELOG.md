@@ -7,8 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.1.2] - 2026-05-20
+
+### Fixed
+- Fixed readonly filesystem which can not write to tmp. This prevents multipart uploads
+
+ 
 ### Added
-- Structured logging via `log/slog` (Go standard library) following fusion-platform logging principles
+- Structured l-gging via `log/slog` (Go standard library) following fusion-platform logging principles
   - `LOG_LEVEL` env var (`debug` | `info` | `warn` | `error`, default `info`)
   - `LOG_FORMAT` env var (`json` | `text`, default `json` — JSON for k8s log collectors, text for local dev)
   - Per-request logging middleware (`internal/api/middleware/logging.go`): generates a `request_id`, attaches `{method, path, client_ip}` to every log line, emits one access log entry (status + latency_ms) after each handler
