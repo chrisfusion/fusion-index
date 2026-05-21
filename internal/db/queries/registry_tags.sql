@@ -23,3 +23,8 @@ ORDER BY tag ASC;
 -- name: DeleteArtifactTag :exec
 DELETE FROM registry_artifact_tag
 WHERE artifact_id = $1 AND tag = $2;
+
+-- name: ListTagsByVersionIDs :many
+SELECT * FROM registry_artifact_tag
+WHERE version_id = ANY($1::bigint[])
+ORDER BY version_id ASC, tag ASC;

@@ -41,6 +41,7 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	fh := handlers.NewFileHandler(pool, q, s, storageBackend)
 	th := handlers.NewTagHandler(pool, q)
 	tyh := handlers.NewTypeHandler(pool, q)
+	adh := handlers.NewAdminHandler(q, cfg.AdminProtectedTag)
 
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.NewAuthMiddleware(cfg))
@@ -80,6 +81,15 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	v1.GET("/artifacts/:id/types", tyh.ListForArtifact)
 	v1.PUT("/artifacts/:id/types/:typeId", tyh.Assign)
 	v1.DELETE("/artifacts/:id/types/:typeId", tyh.Unassign)
+
+	// Admin — maintenance endpoints
+	admin := v1.Group("/admin")
+	admin.GET("/artifacts/empty", adh.ListEmptyArtifacts)
+	admin.DELETE("/artifacts/empty", adh.DeleteEmptyArtifacts)
+	admin.GET("/versions/empty", adh.ListVersionsWithoutFiles)
+	admin.DELETE("/versions/empty", adh.DeleteVersionsWithoutFiles)
+	admin.GET("/artifacts/no-files", adh.ListArtifactsWithoutFiles)
+	admin.DELETE("/artifacts/no-files", adh.DeleteArtifactsWithoutFiles)
 
 	return r
 }

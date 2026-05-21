@@ -24,3 +24,4 @@ data:
   AUTH_ENABLED:         {{ .Values.auth.enabled | toString | quote }}
   AUTH_AUDIENCE:        {{ .Values.auth.audience | default "" | quote }}
   AUTH_ALLOWED_SA:      {{ .Values.auth.allowedServiceAccounts | join "," | quote }}
+  ADMIN_PROTECTED_TAG:  {{ .Values.admin.protectedTag | default "protect" | quote }}

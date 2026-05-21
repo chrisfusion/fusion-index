@@ -20,3 +20,24 @@ ORDER BY major DESC, minor DESC, patch DESC;
 
 -- name: DeleteArtifactVersion :exec
 DELETE FROM registry_artifact_version WHERE id = $1;
+
+-- name: ListVersionsWithoutFiles :many
+SELECT rav.* FROM registry_artifact_version rav
+WHERE rav.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = rav.id)
+ORDER BY rav.created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: CountVersionsWithoutFiles :one
+SELECT COUNT(*) FROM registry_artifact_version rav
+WHERE rav.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = rav.id);
+
+-- name: DeleteVersionsWithoutFiles :execrows
+DELETE FROM registry_artifact_version
+WHERE registry_artifact_version.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = registry_artifact_version.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM registry_artifact_tag rat
+    WHERE rat.artifact_id = registry_artifact_version.artifact_id AND rat.tag = $2
+  );

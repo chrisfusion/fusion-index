@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"fusion-platform/fusion-index/internal/api/middleware"
 	"fusion-platform/fusion-index/internal/semver"
@@ -77,6 +79,20 @@ func pathSemver(c *gin.Context) (semver.Semver, bool) {
 		return semver.Semver{}, false
 	}
 	return sv, true
+}
+
+func parseOlderThan(c *gin.Context) (pgtype.Timestamptz, bool) {
+	raw := c.Query("olderThan")
+	if raw == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "olderThan is required"})
+		return pgtype.Timestamptz{}, false
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "olderThan must be RFC3339 (e.g. 2024-01-01T00:00:00Z)"})
+		return pgtype.Timestamptz{}, false
+	}
+	return pgtype.Timestamptz{Time: t, Valid: true}, true
 }
 
 func parsePagination(c *gin.Context) (page, pageSize int) {

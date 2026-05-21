@@ -28,6 +28,9 @@ type Config struct {
 
 	LogLevel  string // "debug" | "info" | "warn" | "error"
 	LogFormat string // "json" | "text"
+
+	// Admin maintenance
+	AdminProtectedTag string // tag name that shields an artifact from bulk deletes
 }
 
 func Load() *Config {
@@ -50,6 +53,7 @@ func Load() *Config {
 		AuthAllowedSAs:     splitCSV(getEnv("AUTH_ALLOWED_SA", "")),
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 		LogFormat:          getEnv("LOG_FORMAT", "json"),
+		AdminProtectedTag:  getEnv("ADMIN_PROTECTED_TAG", "protect"),
 	}
 }
 

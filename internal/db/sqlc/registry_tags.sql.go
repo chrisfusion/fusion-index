@@ -114,6 +114,39 @@ func (q *Queries) ListArtifactTagsByVersionID(ctx context.Context, versionID int
 	return items, nil
 }
 
+const listTagsByVersionIDs = `-- name: ListTagsByVersionIDs :many
+SELECT id, artifact_id, tag, version_id, created_at, updated_at FROM registry_artifact_tag
+WHERE version_id = ANY($1::bigint[])
+ORDER BY version_id ASC, tag ASC
+`
+
+func (q *Queries) ListTagsByVersionIDs(ctx context.Context, dollar_1 []int64) ([]RegistryArtifactTag, error) {
+	rows, err := q.db.Query(ctx, listTagsByVersionIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifactTag
+	for rows.Next() {
+		var i RegistryArtifactTag
+		if err := rows.Scan(
+			&i.ID,
+			&i.ArtifactID,
+			&i.Tag,
+			&i.VersionID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertArtifactTag = `-- name: UpsertArtifactTag :one
 INSERT INTO registry_artifact_tag (artifact_id, tag, version_id)
 VALUES ($1, $2, $3)

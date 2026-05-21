@@ -106,6 +106,15 @@ backend:
     targetCPUUtilizationPercentage: 70
 
 # -----------------------------------------------------------------------------
+# Admin — maintenance endpoint configuration
+# -----------------------------------------------------------------------------
+admin:
+  # Tag name that protects an artifact (and all its versions) from bulk admin deletes.
+  # Any artifact carrying this tag is skipped by DELETE /api/v1/admin/** operations.
+  # Maps to the ADMIN_PROTECTED_TAG env var.
+  protectedTag: "protect"
+
+# -----------------------------------------------------------------------------
 # Authentication — Kubernetes service account token validation
 #
 # When enabled the backend calls the cluster TokenReview API to validate every

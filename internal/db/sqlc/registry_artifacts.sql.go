@@ -7,7 +7,40 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countArtifactsWithoutFiles = `-- name: CountArtifactsWithoutFiles :one
+SELECT COUNT(*) FROM registry_artifact ra
+WHERE ra.created_at < $1
+  AND EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM registry_artifact_version rav2
+    JOIN registry_artifact_file raf ON raf.version_id = rav2.id
+    WHERE rav2.artifact_id = ra.id
+  )
+`
+
+func (q *Queries) CountArtifactsWithoutFiles(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countArtifactsWithoutFiles, createdAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countEmptyArtifacts = `-- name: CountEmptyArtifacts :one
+SELECT COUNT(*) FROM registry_artifact ra
+WHERE ra.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
+`
+
+func (q *Queries) CountEmptyArtifacts(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countEmptyArtifacts, createdAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const countRegistryArtifacts = `-- name: CountRegistryArtifacts :one
 SELECT COUNT(*) FROM registry_artifact
@@ -83,6 +116,51 @@ func (q *Queries) CreateRegistryArtifact(ctx context.Context, arg CreateRegistry
 	return i, err
 }
 
+const deleteArtifactsWithoutFiles = `-- name: DeleteArtifactsWithoutFiles :execrows
+DELETE FROM registry_artifact
+WHERE registry_artifact.created_at < $1
+  AND EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = registry_artifact.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM registry_artifact_version rav2
+    JOIN registry_artifact_file raf ON raf.version_id = rav2.id
+    WHERE rav2.artifact_id = registry_artifact.id
+  )
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = registry_artifact.id AND rat.tag = $2)
+`
+
+type DeleteArtifactsWithoutFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Tag       string             `json:"tag"`
+}
+
+func (q *Queries) DeleteArtifactsWithoutFiles(ctx context.Context, arg DeleteArtifactsWithoutFilesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteArtifactsWithoutFiles, arg.CreatedAt, arg.Tag)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEmptyArtifacts = `-- name: DeleteEmptyArtifacts :execrows
+DELETE FROM registry_artifact
+WHERE registry_artifact.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = registry_artifact.id)
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = registry_artifact.id AND rat.tag = $2)
+`
+
+type DeleteEmptyArtifactsParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Tag       string             `json:"tag"`
+}
+
+func (q *Queries) DeleteEmptyArtifacts(ctx context.Context, arg DeleteEmptyArtifactsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteEmptyArtifacts, arg.CreatedAt, arg.Tag)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteRegistryArtifact = `-- name: DeleteRegistryArtifact :exec
 DELETE FROM registry_artifact WHERE id = $1
 `
@@ -124,6 +202,91 @@ func (q *Queries) GetRegistryArtifactByName(ctx context.Context, fullName string
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listArtifactsWithoutFiles = `-- name: ListArtifactsWithoutFiles :many
+SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
+WHERE ra.created_at < $1
+  AND EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM registry_artifact_version rav2
+    JOIN registry_artifact_file raf ON raf.version_id = rav2.id
+    WHERE rav2.artifact_id = ra.id
+  )
+ORDER BY ra.created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListArtifactsWithoutFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Limit     int32              `json:"limit"`
+	Offset    int32              `json:"offset"`
+}
+
+func (q *Queries) ListArtifactsWithoutFiles(ctx context.Context, arg ListArtifactsWithoutFilesParams) ([]RegistryArtifact, error) {
+	rows, err := q.db.Query(ctx, listArtifactsWithoutFiles, arg.CreatedAt, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifact
+	for rows.Next() {
+		var i RegistryArtifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.FullName,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEmptyArtifacts = `-- name: ListEmptyArtifacts :many
+SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
+WHERE ra.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
+ORDER BY ra.created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListEmptyArtifactsParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Limit     int32              `json:"limit"`
+	Offset    int32              `json:"offset"`
+}
+
+func (q *Queries) ListEmptyArtifacts(ctx context.Context, arg ListEmptyArtifactsParams) ([]RegistryArtifact, error) {
+	rows, err := q.db.Query(ctx, listEmptyArtifacts, arg.CreatedAt, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifact
+	for rows.Next() {
+		var i RegistryArtifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.FullName,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRegistryArtifacts = `-- name: ListRegistryArtifacts :many

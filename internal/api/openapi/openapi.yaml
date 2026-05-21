@@ -29,6 +29,11 @@ tags:
     description: Per-version file upload, download, and metadata
   - name: Types
     description: Artifact type catalog and artifact type assignments
+  - name: Admin
+    description: >
+      Maintenance operations for administrators. All endpoints require `olderThan`
+      (RFC3339 timestamp) and support pagination. Bulk deletes skip artifacts or
+      versions protected by the configured protection tag (default `protect`).
 
 # ---------------------------------------------------------------------------
 # Reusable components
@@ -100,6 +105,17 @@ components:
         type: integer
         minimum: 1
         default: 20
+
+    olderThan:
+      name: olderThan
+      in: query
+      required: true
+      description: >
+        Return only items created before this timestamp (RFC3339, e.g. `2024-01-01T00:00:00Z`).
+      schema:
+        type: string
+        format: date-time
+        example: "2024-01-01T00:00:00Z"
 
   schemas:
     Error:
@@ -299,6 +315,35 @@ components:
           items:
             type: string
           description: Tag names to assign to this version on creation
+
+    BulkDeleteResponse:
+      type: object
+      required: [deleted, skipped]
+      properties:
+        deleted:
+          type: integer
+          format: int64
+          description: Number of items that were deleted
+        skipped:
+          type: integer
+          format: int64
+          description: Number of items skipped due to the protection tag
+
+    VersionPage:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/VersionResponse"
+        total:
+          type: integer
+          format: int64
+        page:
+          type: integer
+        pageSize:
+          type: integer
 
     AssignTagRequest:
       type: object
@@ -1028,6 +1073,156 @@ paths:
                 format: binary
         "404":
           description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ---- Admin -----------------------------------------------------------------
+
+  /api/v1/admin/artifacts/empty:
+    get:
+      tags: [Admin]
+      summary: List artifacts with no versions
+      description: >
+        Returns a paginated list of artifacts that have no versions and were created
+        before `olderThan`. Useful for finding abandoned artifact registrations.
+      operationId: adminListEmptyArtifacts
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: Paginated list of empty artifacts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactPage"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Admin]
+      summary: Bulk delete artifacts with no versions
+      description: >
+        Deletes all artifacts that have no versions and were created before `olderThan`.
+        Artifacts carrying the configured protection tag are skipped and counted in `skipped`.
+      operationId: adminDeleteEmptyArtifacts
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteResponse"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/versions/empty:
+    get:
+      tags: [Admin]
+      summary: List versions with no files
+      description: >
+        Returns a paginated list of versions that have no files and were created
+        before `olderThan`.
+      operationId: adminListVersionsWithoutFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: Paginated list of versions without files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionPage"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Admin]
+      summary: Bulk delete versions with no files
+      description: >
+        Deletes all versions that have no files and were created before `olderThan`.
+        Versions whose parent artifact carries the configured protection tag are skipped.
+      operationId: adminDeleteVersionsWithoutFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteResponse"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/artifacts/no-files:
+    get:
+      tags: [Admin]
+      summary: List artifacts with versions but no files
+      description: >
+        Returns a paginated list of artifacts that have at least one version but
+        no files on any version, and were created before `olderThan`.
+      operationId: adminListArtifactsWithoutFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: Paginated list of artifacts without files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactPage"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Admin]
+      summary: Bulk delete artifacts with versions but no files
+      description: >
+        Deletes all artifacts (and their versions via cascade) that have at least one
+        version but no files anywhere, and were created before `olderThan`.
+        Artifacts carrying the configured protection tag are skipped.
+      operationId: adminDeleteArtifactsWithoutFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteResponse"
+        "400":
+          description: Missing or invalid olderThan
           content:
             application/json:
               schema:

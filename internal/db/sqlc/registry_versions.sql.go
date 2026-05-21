@@ -7,7 +7,22 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countVersionsWithoutFiles = `-- name: CountVersionsWithoutFiles :one
+SELECT COUNT(*) FROM registry_artifact_version rav
+WHERE rav.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = rav.id)
+`
+
+func (q *Queries) CountVersionsWithoutFiles(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countVersionsWithoutFiles, createdAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const createArtifactVersion = `-- name: CreateArtifactVersion :one
 INSERT INTO registry_artifact_version (artifact_id, major, minor, patch, config)
@@ -51,6 +66,29 @@ DELETE FROM registry_artifact_version WHERE id = $1
 func (q *Queries) DeleteArtifactVersion(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, deleteArtifactVersion, id)
 	return err
+}
+
+const deleteVersionsWithoutFiles = `-- name: DeleteVersionsWithoutFiles :execrows
+DELETE FROM registry_artifact_version
+WHERE registry_artifact_version.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = registry_artifact_version.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM registry_artifact_tag rat
+    WHERE rat.artifact_id = registry_artifact_version.artifact_id AND rat.tag = $2
+  )
+`
+
+type DeleteVersionsWithoutFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Tag       string             `json:"tag"`
+}
+
+func (q *Queries) DeleteVersionsWithoutFiles(ctx context.Context, arg DeleteVersionsWithoutFilesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteVersionsWithoutFiles, arg.CreatedAt, arg.Tag)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getArtifactVersion = `-- name: GetArtifactVersion :one
@@ -115,6 +153,48 @@ ORDER BY major DESC, minor DESC, patch DESC
 
 func (q *Queries) ListArtifactVersions(ctx context.Context, artifactID int64) ([]RegistryArtifactVersion, error) {
 	rows, err := q.db.Query(ctx, listArtifactVersions, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifactVersion
+	for rows.Next() {
+		var i RegistryArtifactVersion
+		if err := rows.Scan(
+			&i.ID,
+			&i.ArtifactID,
+			&i.Major,
+			&i.Minor,
+			&i.Patch,
+			&i.Config,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVersionsWithoutFiles = `-- name: ListVersionsWithoutFiles :many
+SELECT rav.id, rav.artifact_id, rav.major, rav.minor, rav.patch, rav.config, rav.created_at FROM registry_artifact_version rav
+WHERE rav.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = rav.id)
+ORDER BY rav.created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListVersionsWithoutFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Limit     int32              `json:"limit"`
+	Offset    int32              `json:"offset"`
+}
+
+func (q *Queries) ListVersionsWithoutFiles(ctx context.Context, arg ListVersionsWithoutFilesParams) ([]RegistryArtifactVersion, error) {
+	rows, err := q.db.Query(ctx, listVersionsWithoutFiles, arg.CreatedAt, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

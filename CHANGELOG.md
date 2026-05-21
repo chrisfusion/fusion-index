@@ -9,6 +9,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-05-21
+
+### Added
+- Admin maintenance API at `/api/v1/admin/**` — 6 endpoints for inspecting and cleaning up abandoned registry data:
+  - `GET /api/v1/admin/artifacts/empty` — list artifacts with no versions (paginated, `olderThan` required)
+  - `DELETE /api/v1/admin/artifacts/empty` — bulk delete empty artifacts
+  - `GET /api/v1/admin/versions/empty` — list versions with no files (paginated)
+  - `DELETE /api/v1/admin/versions/empty` — bulk delete file-less versions
+  - `GET /api/v1/admin/artifacts/no-files` — list artifacts whose versions have no files (paginated)
+  - `DELETE /api/v1/admin/artifacts/no-files` — bulk delete such artifacts and their versions (cascade)
+- All bulk deletes return `{"deleted": N, "skipped": M}` where `skipped` counts items protected by a configurable tag
+- Protection tag configurable via `ADMIN_PROTECTED_TAG` env var (default `protect`); Helm value `admin.protectedTag`
+- All 6 endpoints documented in the OpenAPI spec under the `Admin` tag
+
+---
+
 ## [0.1.2] - 2026-05-20
 
 ### Fixed
