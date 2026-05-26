@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -31,6 +32,9 @@ type Config struct {
 
 	// Admin maintenance
 	AdminProtectedTag string // tag name that shields an artifact from bulk deletes
+
+	// Metrics
+	MetricsCacheTTL time.Duration // how long /q/metrics results are cached
 }
 
 func Load() *Config {
@@ -54,6 +58,7 @@ func Load() *Config {
 		LogLevel:           getEnv("LOG_LEVEL", "info"),
 		LogFormat:          getEnv("LOG_FORMAT", "json"),
 		AdminProtectedTag:  getEnv("ADMIN_PROTECTED_TAG", "protect"),
+		MetricsCacheTTL:    parseDuration(getEnv("METRICS_CACHE_TTL", "60s")),
 	}
 }
 
@@ -67,6 +72,14 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseDuration(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 60 * time.Second
+	}
+	return d
 }
 
 func splitCSV(s string) []string {

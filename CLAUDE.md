@@ -20,8 +20,11 @@ internal/
 │   │   ├── registry_artifacts.sql
 │   │   ├── registry_versions.sql
 │   │   ├── registry_files.sql
-│   │   └── registry_tags.sql
+│   │   ├── registry_tags.sql
+│   │   └── registry_metrics.sql  # aggregate queries for /q/metrics
 │   └── sqlc/                   # generated Go — DO NOT EDIT
+├── metrics/
+│   └── cache.go                # Snapshot struct + TTL cache with singleflight for /q/metrics
 ├── storage/
 │   ├── storage.go              # Storage interface (Store/Retrieve/Delete)
 │   ├── filesystem.go
@@ -38,6 +41,7 @@ internal/
     │   ├── versions.go         # CRUD on registry_artifact_version + tag-on-create
     │   ├── files.go            # multipart upload / download / delete
     │   ├── tags.go             # PUT/DELETE tags (upsert moves tag)
+    │   ├── metrics.go          # GET /q/metrics — loads Snapshot via metrics.Cache
     │   └── helpers.go          # pathID, pathFileID, pathSemver, isUniqueViolation, isNotFound
     └── dto/
         ├── requests.go         # binding-tagged request structs
@@ -54,6 +58,8 @@ sqlc.yaml                       # sqlc config
 | `registry_artifact_version` | `id`, `artifact_id FK`, `major/minor/patch INT`, `config TEXT`; UNIQUE `(artifact_id, major, minor, patch)` |
 | `registry_artifact_file` | `id`, `version_id FK`, `name`, `content_type`, `size_bytes`, `storage_backend`, `storage_path`, `status`; UNIQUE `(version_id, name)` |
 | `registry_artifact_tag` | `id`, `artifact_id FK`, `tag VARCHAR(255)`, `version_id FK`; UNIQUE `(artifact_id, tag)` |
+| `registry_artifact_type` | `id`, `name VARCHAR(255) UNIQUE`, `description TEXT` |
+| `registry_artifact_type_map` | `id`, `artifact_id FK`, `type_id FK`; UNIQUE `(artifact_id, type_id)` |
 
 ## Key Conventions
 - **OpenAPI spec:** hand-written `internal/api/openapi/openapi.yaml` (OpenAPI 3.1); embedded via `//go:embed` and served as JSON. swaggo/swag does NOT support 3.1 — don't use it.
@@ -61,6 +67,9 @@ sqlc.yaml                       # sqlc config
 - **yaml.v3 → JSON:** `yaml.v3` may return `map[any]any` for non-string-keyed maps; always call `normaliseYAML()` (in `internal/api/openapi/handler.go`) before `json.Marshal` to avoid a panic.
 - All DB access goes through `internal/db/sqlc` (generated). Never write raw pgx queries outside that layer.
 - sqlc generates `pgtype.Timestamptz`. Always access `.Time` in response mappers — the sqlc.yaml `timestamptz → time.Time` override does NOT take effect with pgx/v5.
+- **sqlc aggregate types:** `COALESCE(SUM(nullable_col), 0)` without an explicit cast generates `interface{}`. Always use `::bigint` + named alias: `COALESCE(SUM(size_bytes), 0)::bigint AS total_bytes`.
+- **singleflight + context:** Inside `singleflight.Group.Do`, always use `context.Background()` for DB calls — using the caller's request context means a client disconnect aborts all concurrent waiters.
+- **Read-only snapshot transactions:** Wrap multi-query aggregate reads in `pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})` + `q.WithTx(tx)` to prevent inconsistent snapshots.
 - golang-migrate uses `lib/pq` internally (not pgx). Append `?sslmode=disable` to DBURL or migrations fail.
 - Regenerate after SQL changes: `~/go/bin/sqlc generate`
 - Transactions via `q.WithTx(tx)` for atomic operations (version create + tag upsert, artifact create + name check, etc.).
@@ -85,6 +94,7 @@ sqlc.yaml                       # sqlc config
 | GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}/download` | Download stream |
 | DELETE | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | Delete file |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
+| GET | `/q/metrics` | Registry aggregate metrics (TTL-cached, always public) |
 | GET | `/api/openapi.json` | OpenAPI 3.1 spec as JSON |
 | GET | `/swagger/` | Swagger UI (assets from CDN, HTML embedded in binary) |
 
@@ -107,6 +117,7 @@ sqlc.yaml                       # sqlc config
 | `AUTH_ENABLED` | `false` | `true` to enable K8s SA token validation |
 | `AUTH_AUDIENCE` | _(empty)_ | If set, token audience is validated (recommended: `fusion-index`) |
 | `AUTH_ALLOWED_SA` | _(empty)_ | Comma-separated `namespace/name` allowlist; empty = any valid SA |
+| `METRICS_CACHE_TTL` | `60s` | How long `/q/metrics` results are cached; any `time.ParseDuration` value (e.g. `30s`, `5m`) |
 
 ## Local Testing
 
@@ -135,7 +146,7 @@ helm upgrade --install fusion-index deployment/ \
 - **K8s SA token auth:** `internal/api/middleware/auth.go` — calls `POST /apis/authentication.k8s.io/v1/tokenreviews` directly via `net/http` (no client-go). Uses in-cluster CA (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`) and own SA token.
 - **SA token re-read per request** — kubelet rotates projected tokens; always `os.ReadFile(saTokenPath)` fresh, never cache.
 - **Username format:** K8s returns `system:serviceaccount:<namespace>:<name>`; allowlist entries use `namespace/name` (converted by `saFromUsername`).
-- **Protected scope:** auth middleware applied to `/api/v1` group only — `/q/health/*`, `/api/openapi.json`, `/swagger/` are always public.
+- **Protected scope:** auth middleware applied to `/api/v1` group only — `/q/health/*`, `/q/metrics`, `/api/openapi.json`, `/swagger/` are always public.
 - **Disabled locally:** `AUTH_ENABLED=false` (default) makes middleware a no-op; safe for local dev outside cluster.
 
 ## Helm — Authentication

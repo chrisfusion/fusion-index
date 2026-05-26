@@ -39,11 +39,11 @@ spec:
       serviceAccountName: {{ include "fusion-index.backendServiceName" . }}
       {{- with .Values.backend.podSecurityContext }}
       securityContext:
-        {{- toYaml . | nindent 8 }}i
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
       - name: ephemeral-tmp
-        empytDir:
+        emptyDir:
           sizeLimit: "2Gi"
       containers:
         - name: backend

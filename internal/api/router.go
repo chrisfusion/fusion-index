@@ -11,6 +11,7 @@ import (
 	"fusion-platform/fusion-index/internal/api/openapi"
 	"fusion-platform/fusion-index/internal/config"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
+	"fusion-platform/fusion-index/internal/metrics"
 	"fusion-platform/fusion-index/internal/storage"
 )
 
@@ -35,6 +36,10 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "UP"})
 	})
+
+	// Metrics — intentionally public (no auth) for Prometheus/dashboard scraping
+	mh := handlers.NewMetricsHandler(pool, q, metrics.NewCache(cfg.MetricsCacheTTL))
+	r.GET("/q/metrics", mh.Get)
 
 	ah := handlers.NewArtifactHandler(pool, q)
 	vh := handlers.NewVersionHandler(pool, q, s)

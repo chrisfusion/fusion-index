@@ -9,6 +9,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.0] — 2026-05-26
+
+### Added
+- `GET /q/metrics` endpoint exposing registry aggregate metrics: total artifacts, versions, tags, files by status (AVAILABLE / PENDING / ERROR), total storage bytes, artifacts without tags, artifacts without versions, and per-type artifact counts
+- In-memory TTL cache for metrics queries with singleflight deduplication — prevents thundering-herd DB load when the cache expires under concurrent requests
+- `METRICS_CACHE_TTL` env var (default `60s`) to configure cache lifetime; Helm value `backend.metricsCacheTtl` can be added to expose it
+
+---
+
 ## [0.2.0] — 2026-05-21
 
 ### Added
