@@ -45,6 +45,11 @@ spec:
       - name: ephemeral-tmp
         emptyDir:
           sizeLimit: "2Gi"
+      {{- if and (eq .Values.backend.storageBackend "FILESYSTEM") .Values.backend.persistence.enabled }}
+      - name: artifacts-storage
+        persistentVolumeClaim:
+          claimName: {{ include "fusion-index.backendServiceName" . }}-artifacts
+      {{- end }}
       containers:
         - name: backend
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
@@ -56,6 +61,10 @@ spec:
           volumeMounts:
           - name: ephemeral-tmp
             mountPath: /tmp
+          {{- if and (eq .Values.backend.storageBackend "FILESYSTEM") .Values.backend.persistence.enabled }}
+          - name: artifacts-storage
+            mountPath: {{ .Values.backend.persistence.mountPath | default "/data/artifacts" }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8080

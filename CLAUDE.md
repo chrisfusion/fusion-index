@@ -169,6 +169,12 @@ All knobs live under `backend.*` in `values.yaml`:
 ## Helm — Ingress Body Size
 `ingress.proxyBodySize` in `values.yaml` — sets `nginx.ingress.kubernetes.io/proxy-body-size`. Defaults to `"100m"`. The Nginx default is `1m`, which silently rejects large artifact uploads with HTTP 413. Set to `"0"` for unlimited. Merged with `ingress.annotations`; explicit annotations take precedence for the same key.
 
+## Helm — Filesystem Storage Persistence
+- `storageBackend: FILESYSTEM` with no PVC = ephemeral — files vanish on pod restart.
+- `backend.persistence.enabled: true` creates PVC `fusion-index-backend-artifacts` and wires `STORAGE_FS_ROOT` to the mount path (`/data/artifacts`). Enabled by default in `values-dev.yaml`.
+- minikube uses the `standard` (hostPath) StorageClass — survives `rollout restart` and `minikube stop/start`, but NOT `minikube delete`.
+- To verify persistence: upload a file → `kubectl rollout restart deployment/fusion-index-backend -n fusion` → download the file again.
+
 ## Logging
 
 Platform-wide logging spec: `../logging_principles.md` (applies to this service).

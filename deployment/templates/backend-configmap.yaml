@@ -13,7 +13,9 @@ data:
   DB_USERNAME:          {{ include "fusion-index.dbUsername" . | quote }}
   DB_SSLMODE:           {{ .Values.backend.dbSSLMode | default "disable" | quote }}
   STORAGE_BACKEND:      {{ .Values.backend.storageBackend | default "S3" | quote }}
-  {{- if ne .Values.backend.storageBackend "FILESYSTEM" }}
+  {{- if eq .Values.backend.storageBackend "FILESYSTEM" }}
+  STORAGE_FS_ROOT:      {{ .Values.backend.persistence.mountPath | default "/data/artifacts" | quote }}
+  {{- else }}
   S3_BUCKET:            {{ .Values.s3.bucket | quote }}
   AWS_REGION:           {{ .Values.s3.region | quote }}
   S3_ENDPOINT_OVERRIDE: {{ .Values.s3.endpointOverride | default "" | quote }}

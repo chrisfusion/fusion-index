@@ -7,6 +7,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Helm `backend.persistence` block — when `storageBackend=FILESYSTEM`, a PVC is created and mounted at `backend.persistence.mountPath` (default `/data/artifacts`), with `STORAGE_FS_ROOT` wired automatically. Enabled by default in `values-dev.yaml` (5 Gi, minikube hostPath provisioner) so artifact files survive pod restarts in local development. Production (`storageBackend=S3`) is unaffected.
+
 ---
 
 ## [0.3.0] — 2026-05-26

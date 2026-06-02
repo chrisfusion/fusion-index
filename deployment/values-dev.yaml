@@ -21,6 +21,9 @@ backend:
     tag: latest
   storageBackend: FILESYSTEM   # no S3 in local dev
   ginMode: debug
+  persistence:
+    enabled: true
+    size: 5Gi   # minikube hostPath provisioner — survives pod restarts, not minikube delete
 
 postgresql:
   image:

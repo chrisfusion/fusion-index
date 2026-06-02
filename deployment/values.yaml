@@ -105,6 +105,16 @@ backend:
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
 
+  # Persistent storage for FILESYSTEM backend.
+  # Disabled by default — production uses S3.
+  # Enable when storageBackend=FILESYSTEM to survive pod restarts.
+  persistence:
+    enabled: false
+    size: 10Gi
+    storageClass: ""          # empty = cluster default StorageClass
+    accessMode: ReadWriteOnce
+    mountPath: /data/artifacts
+
 # -----------------------------------------------------------------------------
 # Admin — maintenance endpoint configuration
 # -----------------------------------------------------------------------------
