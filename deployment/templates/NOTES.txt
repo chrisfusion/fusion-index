@@ -1,10 +1,10 @@
 fusion-index has been deployed.
 
   Release:   {{ .Release.Name }}
-  Namespace: {{ .Values.namespace }}
+  Namespace: {{ .Release.Namespace }}
 
 Services:
-  Backend API:  http://{{ include "fusion-index.backendServiceName" . }}.{{ .Values.namespace }}.svc.cluster.local:8080
+  Backend API:  http://{{ include "fusion-index.backendServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:8080
 
 {{- if .Values.ingress.enabled }}
 

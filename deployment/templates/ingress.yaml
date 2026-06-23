@@ -3,7 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ .Release.Name }}-ingress
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "fusion-index.labels" . | nindent 4 }}
   {{- $ingressAnno := merge (dict) (.Values.ingress.annotations | default dict) }}

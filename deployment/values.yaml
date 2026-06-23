@@ -2,9 +2,6 @@
 # fusion-index — Helm Values (production defaults)
 # =============================================================================
 
-# Kubernetes namespace — must match the fusion platform namespace
-namespace: fusion
-
 # Set to false if the namespace already exists (e.g. fusion-spectra installed it first)
 createNamespace: true
 

@@ -14,7 +14,7 @@ app.kubernetes.io/name: fusion-index
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
@@ -22,7 +22,7 @@ Database host — Bitnami subchart FQDN or external host.
 */}}
 {{- define "fusion-index.dbHost" -}}
 {{- if .Values.postgresql.enabled -}}
-{{- printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Values.namespace -}}
+{{- printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
 {{- else -}}
 {{- .Values.postgresql.external.host -}}
 {{- end -}}
