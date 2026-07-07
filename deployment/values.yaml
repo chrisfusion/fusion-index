@@ -146,33 +146,51 @@ auth:
   allowedServiceAccounts: []
 
 # -----------------------------------------------------------------------------
-# PostgreSQL — Bitnami subchart (bundled) or external
+# PostgreSQL — connection to a pre-installed instance
 #
-# Bundled (default):  postgresql.enabled: true
-# External:           postgresql.enabled: false  +  postgresql.external.*
+# fusion-index does not install or manage PostgreSQL itself. Point it at an
+# existing instance (in-cluster, RDS, Cloud SQL, etc.) via the fields below.
 # -----------------------------------------------------------------------------
 postgresql:
-  enabled: true
+  host: ""
+  port: 5432
+  database: fusion_index
+  username: fusion
+  existingSecret: ""     # if set, password below is ignored; secret must have key 'password'
+  password: "changeme"   # override in production — or use existingSecret
 
-  auth:
-    database: fusion_index
-    username: fusion
-    password: "changeme"   # override in production — or use existingSecret
-    existingSecret: ""     # if set, password above is ignored; secret must have key 'password'
+  # Admin/superuser credentials used only by createDatabaseJob below to run
+  # CREATE DATABASE before the app's own database exists. Kept separate from
+  # postgresql.username/password above, which are the app's runtime credentials
+  # and typically do not have CREATEDB privilege. Connects to the same
+  # postgresql.host/port as the app.
+  admin:
+    username: postgres
+    existingSecret: ""          # if set, password below is ignored; secret must have key matching existingSecretKey
+    existingSecretKey: "password"
+    password: ""                # fallback when existingSecret is empty
 
-  primary:
-    persistence:
-      enabled: true
-      size: 8Gi
-
-  # External PostgreSQL settings — only used when enabled: false
-  external:
-    host: ""
-    port: 5432
-    database: fusion_index
-    username: fusion
-    existingSecret: ""     # must contain key 'password'
-    password: ""           # fallback — prefer existingSecret in production
+  # Runs as a Helm pre-install,pre-upgrade hook Job that creates
+  # postgresql.database (CREATE DATABASE IF NOT EXISTS-equivalent, idempotent)
+  # before the main Deployment is applied. It does NOT create tables — schema
+  # migrations are applied by the fusion-index binary itself on startup.
+  createDatabaseJob:
+    enabled: true
+    image: postgres:16-alpine
+    activeDeadlineSeconds: 120
+    # postgres:16-alpine runs as UID 70 (user "postgres"). Only the psql client
+    # is used here (non-interactive -c mode), so readOnlyRootFilesystem is safe
+    # with no extra volumes.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 70
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
 
 # -----------------------------------------------------------------------------
 # S3 artifact storage — external only

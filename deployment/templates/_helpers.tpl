@@ -18,71 +18,63 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- end }}
 
 {{/*
-Database host — Bitnami subchart FQDN or external host.
+Database host.
 */}}
 {{- define "fusion-index.dbHost" -}}
-{{- if .Values.postgresql.enabled -}}
-{{- printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace -}}
-{{- else -}}
-{{- .Values.postgresql.external.host -}}
-{{- end -}}
+{{- .Values.postgresql.host -}}
 {{- end }}
 
 {{/*
 Database port.
 */}}
 {{- define "fusion-index.dbPort" -}}
-{{- if .Values.postgresql.enabled -}}
-5432
-{{- else -}}
-{{- .Values.postgresql.external.port | default 5432 -}}
-{{- end -}}
+{{- .Values.postgresql.port | default 5432 -}}
 {{- end }}
 
 {{/*
 Database name.
 */}}
 {{- define "fusion-index.dbName" -}}
-{{- if .Values.postgresql.enabled -}}
-{{- .Values.postgresql.auth.database -}}
-{{- else -}}
-{{- .Values.postgresql.external.database -}}
-{{- end -}}
+{{- .Values.postgresql.database -}}
 {{- end }}
 
 {{/*
 Database username.
 */}}
 {{- define "fusion-index.dbUsername" -}}
-{{- if .Values.postgresql.enabled -}}
-{{- .Values.postgresql.auth.username -}}
-{{- else -}}
-{{- .Values.postgresql.external.username -}}
-{{- end -}}
+{{- .Values.postgresql.username -}}
 {{- end }}
 
 {{/*
 Secret name that contains the database password (key: "password").
 
 Resolution order:
-  1. Bundled postgresql + existingSecret set  → user-provided secret
-  2. Bundled postgresql, no existingSecret    → Bitnami auto-generated secret (<release>-postgresql)
-  3. External DB + existingSecret set         → user-provided secret
-  4. External DB, no existingSecret           → chart-managed secret (<release>-db-secret)
+  1. existingSecret set    → user-provided secret
+  2. no existingSecret     → chart-managed secret (<release>-db-secret)
 */}}
 {{- define "fusion-index.dbSecretName" -}}
-{{- if .Values.postgresql.enabled -}}
-  {{- if .Values.postgresql.auth.existingSecret -}}
-    {{- .Values.postgresql.auth.existingSecret -}}
-  {{- else -}}
-    {{- printf "%s-postgresql" .Release.Name -}}
-  {{- end -}}
+{{- if .Values.postgresql.existingSecret -}}
+  {{- .Values.postgresql.existingSecret -}}
 {{- else -}}
-  {{- if .Values.postgresql.external.existingSecret -}}
-    {{- .Values.postgresql.external.existingSecret -}}
-  {{- else -}}
-    {{- printf "%s-db-secret" .Release.Name -}}
-  {{- end -}}
+  {{- printf "%s-db-secret" .Release.Name -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret name holding the PostgreSQL admin/superuser credentials (key matching
+postgresql.admin.existingSecretKey) used by the one-time create-database Job.
+Not the same secret as dbSecretName above, which holds the app's own runtime
+DB_PASSWORD.
+
+Resolution order:
+  1. postgresql.admin.existingSecret set → user-provided secret
+  2. no existingSecret                   → chart-managed secret (<release>-postgresql-admin)
+*/}}
+{{- define "fusion-index.pgAdminSecretName" -}}
+{{- if .Values.postgresql.admin.existingSecret -}}
+  {{- .Values.postgresql.admin.existingSecret -}}
+{{- else -}}
+  {{- printf "%s-postgresql-admin" .Release.Name -}}
 {{- end -}}
 {{- end }}
 

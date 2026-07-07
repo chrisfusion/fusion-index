@@ -12,7 +12,7 @@ This guide covers every deployment scenario for **fusion-index**, from a local d
 4. [Minikube (local Kubernetes)](#minikube)
 5. [Production Kubernetes via Helm](#production-kubernetes)
 6. [Storage Backends](#storage-backends)
-7. [Database: external PostgreSQL](#external-postgresql)
+7. [Database: PostgreSQL configuration](#postgresql-configuration)
 8. [Upgrading](#upgrading)
 
 ---
@@ -22,7 +22,7 @@ This guide covers every deployment scenario for **fusion-index**, from a local d
 | Tool | Version | Notes |
 |------|---------|-------|
 | Go | 1.25+ | `go version` |
-| PostgreSQL | 15 or 16 | Bitnami subchart or external |
+| PostgreSQL | 15 or 16 | Pre-installed instance — fusion-index does not install or manage PostgreSQL |
 | Docker | 20+ | Required for integration tests and image builds |
 | kubectl | 1.28+ | For Kubernetes deployments |
 | Helm | 3.14+ | For chart installs |
@@ -160,14 +160,16 @@ backend:
   ginMode: debug
 
 postgresql:
-  auth:
+  host: postgresql.fusion.svc.cluster.local   # pre-installed Postgres shared in the fusion namespace
+  password: "devpass"
+  admin:
+    username: postgres
     password: "devpass"
-  primary:
-    persistence:
-      enabled: false        # no PVC in dev
 
 # s3 block intentionally omitted — FILESYSTEM storage skips all S3 wiring
 ```
+
+This assumes a PostgreSQL instance is already reachable in the cluster at `postgresql.fusion.svc.cluster.local` — fusion-index does not install one for you. Adjust `postgresql.host`/`postgresql.password`/`postgresql.admin.*` to match your local setup if different. On install, the `<release>-create-db` hook Job connects with `postgresql.admin.*` and creates `postgresql.database` (`fusion_index`) if it doesn't already exist.
 
 ### Install (or upgrade)
 
@@ -188,7 +190,6 @@ helm upgrade --install fusion-index deployment/ \
 kubectl get pods -n fusion
 # NAME                                    READY   STATUS    RESTARTS
 # fusion-index-backend-<hash>             1/1     Running   0
-# fusion-index-postgresql-0              1/1     Running   0
 ```
 
 ### Access the API
@@ -262,13 +263,16 @@ backend:
     targetCPUUtilizationPercentage: 70
 
 postgresql:
-  enabled: false
-  external:
-    host: pg.prod.internal
-    port: 5432
-    database: fusion_index
-    username: fusion
-    existingSecret: fusion-index-db-creds   # key: password
+  host: pg.prod.internal
+  port: 5432
+  database: fusion_index
+  username: fusion
+  existingSecret: fusion-index-db-creds   # key: password
+  admin:
+    username: postgres
+    existingSecret: fusion-index-db-admin-creds   # key: password — superuser/CREATEDB privilege
+  createDatabaseJob:
+    enabled: true   # set false if fusion_index is already provisioned by other tooling
 
 s3:
   bucket: fusion-index-artifacts-prod
@@ -320,22 +324,35 @@ Authentication is via standard AWS credential chain: env vars → IRSA → insta
 
 ---
 
-## External PostgreSQL
+## PostgreSQL configuration
 
-Set `postgresql.enabled: false` and fill in the `postgresql.external.*` block:
+fusion-index does not install or manage PostgreSQL — point the chart at a pre-installed instance via the `postgresql.*` values:
 
 ```yaml
 postgresql:
-  enabled: false
-  external:
-    host: pg.internal
-    port: 5432
-    database: fusion_index
-    username: fusion
-    existingSecret: my-pg-secret   # Kubernetes Secret with key: password
+  host: pg.internal
+  port: 5432
+  database: fusion_index
+  username: fusion
+  existingSecret: my-pg-secret   # Kubernetes Secret with key: password
 ```
 
-The chart will create no internal PostgreSQL and will reference your secret directly.
+If `existingSecret` is left empty, the chart creates a `<release>-db-secret` Secret from `postgresql.password` instead.
+
+### Automatic database creation
+
+`postgresql.createDatabaseJob` (enabled by default) runs a `pre-install,pre-upgrade` Helm hook Job that creates `postgresql.database` on the target instance if it doesn't already exist — idempotent, so safe on every `helm upgrade`. It does **not** create tables; schema migrations run from the fusion-index binary itself on startup.
+
+The job connects as a separate admin/superuser identity (`postgresql.admin.*`), since the app's own `postgresql.username` typically lacks `CREATEDB` privilege:
+
+```yaml
+postgresql:
+  admin:
+    username: postgres
+    existingSecret: my-pg-admin-secret   # Kubernetes Secret with key matching existingSecretKey (default "password")
+```
+
+Set `postgresql.createDatabaseJob.enabled: false` if the database is already provisioned by other tooling (e.g. Terraform, a DBA-managed instance).
 
 ---
 

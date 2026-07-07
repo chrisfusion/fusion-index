@@ -18,16 +18,13 @@ API smoke-test:
   curl -s http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/api/v1/artifacts | python3 -m json.tool
 {{- end }}
 
-{{- if .Values.postgresql.enabled }}
 
 PostgreSQL:
-  Host: {{ include "fusion-index.dbHost" . }}
+  Host: {{ include "fusion-index.dbHost" . }}:{{ include "fusion-index.dbPort" . }}
   DB:   {{ include "fusion-index.dbName" . }}
   User: {{ include "fusion-index.dbUsername" . }}
-{{- else }}
-
-PostgreSQL (external):
-  Host: {{ .Values.postgresql.external.host }}:{{ .Values.postgresql.external.port }}
+{{- if .Values.postgresql.createDatabaseJob.enabled }}
+  (created automatically by the {{ .Release.Name }}-create-db pre-install/pre-upgrade hook Job)
 {{- end }}
 
 {{- if ne .Values.backend.storageBackend "FILESYSTEM" }}

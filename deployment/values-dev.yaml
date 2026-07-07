@@ -26,13 +26,11 @@ backend:
     size: 5Gi   # minikube hostPath provisioner — survives pod restarts, not minikube delete
 
 postgresql:
-  image:
-    tag: latest         # Bitnami removes pinned tags; use latest for dev
-  auth:
+  host: postgresql.fusion.svc.cluster.local   # pre-installed Postgres shared in the fusion namespace
+  password: "devpass"
+  admin:
+    username: postgres
     password: "devpass"
-  primary:
-    persistence:
-      enabled: false    # no PVC needed in dev
 
 # s3 block intentionally omitted — storageBackend=FILESYSTEM skips all S3 wiring
 

@@ -142,6 +142,8 @@ helm upgrade --install fusion-index deployment/ \
 - Port-forward: `kubectl port-forward -n fusion service/fusion-index-backend 18080:8080 --address 127.0.0.1`
 - Smoke-test: `curl -s http://127.0.0.1:18080/api/v1/artifacts | python3 -m json.tool`
 
+**Testing structural chart changes (new resources, removed dependencies, hook changes):** never `helm upgrade` the live releases in `fusion`/`fusion-dev-a`/`fusion-dev-b` — they hold real data. Instead build the image into minikube's docker daemon and `helm install` into a disposable namespace with a throwaway `postgres:16-alpine` Deployment+Service as the target, then delete the namespace when done.
+
 ## Authentication
 - **K8s SA token auth:** `internal/api/middleware/auth.go` — calls `POST /apis/authentication.k8s.io/v1/tokenreviews` directly via `net/http` (no client-go). Uses in-cluster CA (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`) and own SA token.
 - **SA token re-read per request** — kubelet rotates projected tokens; always `os.ReadFile(saTokenPath)` fresh, never cache.
@@ -174,6 +176,11 @@ All knobs live under `backend.*` in `values.yaml`:
 - `backend.persistence.enabled: true` creates PVC `fusion-index-backend-artifacts` and wires `STORAGE_FS_ROOT` to the mount path (`/data/artifacts`). Enabled by default in `values-dev.yaml`.
 - minikube uses the `standard` (hostPath) StorageClass — survives `rollout restart` and `minikube stop/start`, but NOT `minikube delete`.
 - To verify persistence: upload a file → `kubectl rollout restart deployment/fusion-index-backend -n fusion` → download the file again.
+
+## Helm — PostgreSQL
+`postgresql.*` in `values.yaml` is external-only — fusion-index does not install/manage Postgres. App runtime creds: `host`/`port`/`database`/`username`/`password`/`existingSecret`. Separate `postgresql.admin.*` (superuser/CREATEDB) creds are used only by `postgresql.createDatabaseJob`, a `pre-install,pre-upgrade` hook Job that idempotently runs `CREATE DATABASE` before the backend Deployment starts.
+- **Hook-ordering gotcha:** any Secret read by a hook Job must itself be annotated as a hook with an earlier `hook-weight` — ordinary (non-hook) resources apply *after* pre-install/pre-upgrade hooks. Otherwise the Job's pod sits in `CreateContainerConfigError` until `activeDeadlineSeconds` kills it (symptom: Job goes `InProgress` → `Failed`, no pod logs — pod's already deleted). See `postgresql-admin-secret.yaml` (weight `-6`) vs the create-db Job (weight `-5`).
+- **psql gotcha:** `:'var'` substitution only works reading from a script/stdin, NOT via `-c "..."` (verified against postgres:16-alpine) — interpolate trusted, chart-controlled values directly into the SQL string instead.
 
 ## Logging
 
