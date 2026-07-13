@@ -5,7 +5,7 @@ info:
     Artifact registry — stores, indexes, and exposes versioned artifacts via REST.
     Artifacts use Python-style namespaced names (`org.team.name`), semver versions
     (`major.minor.patch`), per-version configurations, file uploads, and mutable tags.
-  version: "0.1.0"
+  version: "0.4.0"
   license:
     name: GPL-3.0
     identifier: GPL-3.0-only

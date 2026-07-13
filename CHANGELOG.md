@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-07
+
 ### Added
 - Helm `backend.persistence` block — when `storageBackend=FILESYSTEM`, a PVC is created and mounted at `backend.persistence.mountPath` (default `/data/artifacts`), with `STORAGE_FS_ROOT` wired automatically. Enabled by default in `values-dev.yaml` (5 Gi, minikube hostPath provisioner) so artifact files survive pod restarts in local development. Production (`storageBackend=S3`) is unaffected.
 - Helm `postgresql.createDatabaseJob` — a `pre-install,pre-upgrade` hook Job (idempotent `CREATE DATABASE`) that provisions `postgresql.database` on the pre-installed PostgreSQL instance before the backend Deployment starts. Enabled by default; connects using separate `postgresql.admin.*` credentials (superuser/CREATEDB privilege), independent of the app's own `postgresql.username`/`password`. Set `postgresql.createDatabaseJob.enabled: false` if the database is provisioned by other tooling.
