@@ -192,6 +192,22 @@ postgresql:
       capabilities:
         drop: ["ALL"]
 
+  # Daily metadata-only backup (artifacts/versions/tags/config — never the artifact
+  # files themselves, which already live durably in S3). Runs `fusion-index backup-db`
+  # (same image as the backend) as a CronJob, streaming a `pg_dump --clean --if-exists`
+  # straight into S3, gzipped. Only rendered when backend.storageBackend=S3 — reuses
+  # the S3 bucket/credentials already required in that mode. No retention/pruning here
+  # by design — configure an S3 lifecycle rule if/when you want old backups expired.
+  # Restore is a deliberately manual operation — see CLAUDE.md "Helm — PostgreSQL
+  # Backup" for the `fusion-index restore-db` runbook; it is NOT wired to any
+  # automatic Helm trigger.
+  backupCronJob:
+    enabled: true
+    schedule: "0 2 * * *"   # daily at 02:00
+    activeDeadlineSeconds: 1800
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 1
+
 # -----------------------------------------------------------------------------
 # S3 artifact storage — external only
 #
@@ -201,6 +217,16 @@ postgresql:
 # -----------------------------------------------------------------------------
 s3:
   bucket: fusion-index-artifacts
+  # Key prefix under the bucket. Namespaces every object under this path so multiple
+  # fusion-index instances can share one bucket without colliding. Left empty (default),
+  # it resolves to "<kubernetes-namespace>/index/data" (see fusion-index.s3Prefix in
+  # _helpers.tpl) — every instance gets a collision-free default for free, with no
+  # per-release configuration needed. Set explicitly (e.g. "index") to override.
+  prefix: ""
+  # Key prefix for daily DB metadata backups (see postgresql.backupCronJob below).
+  # Independent of `prefix` above — not nested under it, since backups aren't
+  # artifact data. Left empty (default), resolves to "<kubernetes-namespace>/index/backups".
+  backupPrefix: ""
   region: us-east-1
   endpointOverride: ""     # set for MinIO, Ceph, or custom S3-compatible endpoints
 
@@ -213,6 +239,19 @@ s3:
   # Do NOT commit real credentials here — inject via --set or a separate values file
   accessKeyId: ""
   secretAccessKey: ""
+
+  # Runs as a pre-install,pre-upgrade hook Job (`fusion-index migrate-s3-prefix`,
+  # same image as the backend) whenever storageBackend=S3. It compares s3.prefix
+  # against the last-applied prefix recorded in a marker ConfigMap; if unchanged
+  # (the common case on every ordinary upgrade) it's a fast no-op. If s3.prefix
+  # changed, it server-side-copies every known object from the old prefix to the
+  # new one — old objects are left in place, not deleted. Requires a namespaced
+  # Role/RoleBinding (deployment/templates/s3-migration-rbac.yaml) scoped to that
+  # one ConfigMap.
+  migrationJob:
+    enabled: true
+    activeDeadlineSeconds: 600
+    backoffLimit: 2
 
 # -----------------------------------------------------------------------------
 # Linkerd service mesh integration

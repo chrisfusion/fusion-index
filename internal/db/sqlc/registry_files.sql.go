@@ -115,6 +115,35 @@ func (q *Queries) ListArtifactFiles(ctx context.Context, versionID int64) ([]Reg
 	return items, nil
 }
 
+const listAvailableS3FilePaths = `-- name: ListAvailableS3FilePaths :many
+SELECT storage_path FROM registry_artifact_file
+WHERE storage_backend = 'S3' AND status = 'AVAILABLE'
+ORDER BY id
+`
+
+// storage_path values for every available S3-backed file, used to drive the S3
+// prefix migration Job (internal/storage/migrate.go): the DB is the exact manifest
+// of keys this instance owns, so migration never has to list bucket contents.
+func (q *Queries) ListAvailableS3FilePaths(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listAvailableS3FilePaths)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var storage_path string
+		if err := rows.Scan(&storage_path); err != nil {
+			return nil, err
+		}
+		items = append(items, storage_path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateArtifactFileStatus = `-- name: UpdateArtifactFileStatus :exec
 UPDATE registry_artifact_file
 SET status     = $2,

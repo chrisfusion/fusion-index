@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o fusion-index ./cmd/server
 FROM alpine:3.19
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates postgresql16-client
 
 COPY --from=build /build/fusion-index .
 COPY --from=build /build/migrations ./migrations

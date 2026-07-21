@@ -2,24 +2,16 @@ package middleware
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"fusion-platform/fusion-index/internal/config"
-)
-
-const (
-	saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	saCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-	k8sAPIBase  = "https://kubernetes.default.svc"
+	"fusion-platform/fusion-index/internal/k8sclient"
 )
 
 // NewAuthMiddleware returns a Gin handler that validates Kubernetes service
@@ -32,7 +24,7 @@ func NewAuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 		return func(c *gin.Context) { c.Next() }
 	}
 
-	client, err := buildK8sClient()
+	client, err := k8sclient.NewHTTPClient()
 	if err != nil {
 		panic("fusion-index: auth enabled but cannot build in-cluster K8s client: " + err.Error())
 	}
@@ -87,29 +79,11 @@ func saFromUsername(username string) string {
 	return username
 }
 
-// buildK8sClient creates an HTTP client that trusts the in-cluster CA and
-// reads its own service account token for authenticating to the API server.
-func buildK8sClient() (*http.Client, error) {
-	ca, err := os.ReadFile(saCAPath)
-	if err != nil {
-		return nil, fmt.Errorf("read cluster CA: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca) {
-		return nil, fmt.Errorf("parse cluster CA certificate")
-	}
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool},
-		},
-	}, nil
-}
-
 // tokenReview types for the authentication.k8s.io/v1 API.
 type tokenReviewRequest struct {
-	APIVersion string              `json:"apiVersion"`
-	Kind       string              `json:"kind"`
-	Spec       tokenReviewSpec     `json:"spec"`
+	APIVersion string          `json:"apiVersion"`
+	Kind       string          `json:"kind"`
+	Spec       tokenReviewSpec `json:"spec"`
 }
 
 type tokenReviewSpec struct {
@@ -122,9 +96,9 @@ type tokenReviewResponse struct {
 }
 
 type tokenReviewStatus struct {
-	Authenticated bool             `json:"authenticated"`
-	User          tokenReviewUser  `json:"user"`
-	Error         string           `json:"error,omitempty"`
+	Authenticated bool            `json:"authenticated"`
+	User          tokenReviewUser `json:"user"`
+	Error         string          `json:"error,omitempty"`
 }
 
 type tokenReviewUser struct {
@@ -135,9 +109,9 @@ type tokenReviewUser struct {
 // authenticated service account username on success.
 func reviewToken(client *http.Client, callerToken, audience string) (string, error) {
 	// Re-read own SA token on every call — kubelet may rotate it.
-	ownToken, err := os.ReadFile(saTokenPath)
+	ownToken, err := k8sclient.ReadToken()
 	if err != nil {
-		return "", fmt.Errorf("read own SA token: %w", err)
+		return "", err
 	}
 
 	spec := tokenReviewSpec{Token: callerToken}
@@ -155,14 +129,14 @@ func reviewToken(client *http.Client, callerToken, audience string) (string, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost,
-		k8sAPIBase+"/apis/authentication.k8s.io/v1/tokenreviews",
+		k8sclient.APIBase+"/apis/authentication.k8s.io/v1/tokenreviews",
 		bytes.NewReader(body),
 	)
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+string(ownToken))
+	req.Header.Set("Authorization", "Bearer "+ownToken)
 
 	resp, err := client.Do(req)
 	if err != nil {

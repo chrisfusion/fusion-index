@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `S3_PREFIX` env var (Helm: `s3.prefix`) — namespaces S3 object keys under a configurable root folder, letting multiple fusion-index instances share a single bucket without colliding. Left unset, the Helm chart defaults it to `<kubernetes-namespace>/index/data` (`fusion-index.s3Prefix` helper) so every instance gets a collision-free default automatically; set `s3.prefix` explicitly to override. The prefix is applied only at the storage layer and is never persisted in `storage_path`, so it can be changed independently of existing DB rows.
+- `fusion-index migrate-s3-prefix` subcommand + Helm `s3.migrationJob` (default `enabled: true`) — a `pre-install,pre-upgrade` hook Job that automatically copies existing S3 objects to a new `s3.prefix` on upgrade. DB-driven (uses `ListAvailableS3FilePaths`, not a bucket listing), copy-only (old objects are left in place), and resumable (already-copied objects are skipped on retry). No-ops (no DB/S3 calls) when the prefix hasn't changed since the last release. See CLAUDE.md "Helm — S3 Prefix Migration" for details.
+- `internal/k8sclient` — shared in-cluster Kubernetes REST client (own SA token + in-cluster CA, no client-go), extracted from `auth.go` and reused by the new migration Job to read/write its marker ConfigMap.
+- **Daily DB metadata backups to S3**, on the premise that S3 is the durable single point of truth and artifact files (already in S3) never need backing up — only the `registry_*` metadata tables (artifacts, versions, tags, configs) do:
+  - `fusion-index backup-db` subcommand + Helm `postgresql.backupCronJob` (default `enabled: true`, daily at 02:00) — streams a `pg_dump --clean --if-exists`, gzipped, directly into S3 via multipart upload. No local temp file, no retention/pruning (rely on an S3 lifecycle rule if you want expiry). `pg_dump`/`psql` honor `DB_SSLMODE` via `PGSSLMODE` (`cmd/server/pgexec.go`), matching the app's own `pgx` connections.
+  - `fusion-index restore-db` subcommand — manual, on-demand disaster recovery (not wired to any automatic Helm trigger). Finds the latest backup (or a specific one via `RESTORE_BACKUP_KEY`) and restores it via `psql`. Refuses to run against a database that already has data unless `RESTORE_FORCE=true`.
+  - New `S3_BACKUP_PREFIX` env var (Helm: `s3.backupPrefix`, default `<namespace>/index/backups`) — independent of `S3_PREFIX`, not nested under it.
+  - Dockerfile now installs `postgresql16-client` in the runtime image for `pg_dump`/`psql`.
+  - See CLAUDE.md "Helm — PostgreSQL Backup" for the full design and the restore runbook.
+
+### Fixed
+- Backend Deployment pod template now carries `checksum/config`/`checksum/secrets` annotations, forcing a rolling restart whenever `backend-configmap.yaml`/`secrets.yaml`'s rendered content changes on `helm upgrade`. Previously a running pod kept using stale env vars (e.g. `S3_PREFIX`, `LOG_LEVEL`) indefinitely after a config-only upgrade, since Kubernetes only restarts pods when the pod template itself changes — found while end-to-end testing the S3 prefix migration above (a stale pod kept writing new uploads under the old prefix after the migration Job had already copied everything to the new one).
+
 ## [0.4.0] — 2026-07-07
 
 ### Added

@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -20,6 +18,23 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "migrate-s3-prefix":
+			runMigrateS3Prefix()
+			return
+		case "backup-db":
+			runBackupDB()
+			return
+		case "restore-db":
+			runRestoreDB()
+			return
+		}
+	}
+	runServer()
+}
+
+func runServer() {
 	cfg := appconfig.Load()
 	setupLogger(cfg)
 
@@ -104,22 +119,11 @@ func runMigrations(dbURL string) {
 func buildStorage(cfg *appconfig.Config) (storage.Storage, error) {
 	switch cfg.StorageBackend {
 	case "S3":
-		awsCfg, err := config.LoadDefaultConfig(context.Background(),
-			config.WithRegion(cfg.AWSRegion),
-		)
+		client, err := storage.NewS3Client(context.Background(), cfg.AWSRegion, cfg.S3EndpointOverride)
 		if err != nil {
-			return nil, fmt.Errorf("load AWS config: %w", err)
+			return nil, err
 		}
-		opts := []func(*awss3.Options){}
-		if cfg.S3EndpointOverride != "" {
-			ep := cfg.S3EndpointOverride
-			opts = append(opts, func(o *awss3.Options) {
-				o.BaseEndpoint = &ep
-				o.UsePathStyle = true
-			})
-		}
-		client := awss3.NewFromConfig(awsCfg, opts...)
-		return storage.NewS3Storage(client, cfg.S3Bucket), nil
+		return storage.NewS3Storage(client, cfg.S3Bucket, cfg.S3Prefix), nil
 	default: // FILESYSTEM
 		return storage.NewFilesystemStorage(cfg.StorageFSRoot), nil
 	}

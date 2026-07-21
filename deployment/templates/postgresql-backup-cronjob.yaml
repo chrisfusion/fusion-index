@@ -1,0 +1,73 @@
+{{- if and (eq .Values.backend.storageBackend "S3") .Values.postgresql.backupCronJob.enabled }}
+{{/*
+  Ordinary resource, not a Helm hook — a CronJob's scheduled runs always use
+  whatever jobTemplate is currently applied, so unlike s3-prefix-migration-job.yaml
+  there's no hook-ordering gotcha here: db-secret/s3-secret/backend-config are
+  guaranteed to already exist by the time any trigger (scheduled or manual) fires.
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-backup-db
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fusion-index.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.postgresql.backupCronJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.postgresql.backupCronJob.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.postgresql.backupCronJob.failedJobsHistoryLimit | default 1 }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.postgresql.backupCronJob.activeDeadlineSeconds | default 1800 }}
+      template:
+        metadata:
+          labels:
+            {{- include "fusion-index.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          # No K8s API access needed for a DB dump — explicitly don't mount one.
+          automountServiceAccountToken: false
+          {{- with .Values.backend.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumes:
+          - name: ephemeral-tmp
+            emptyDir:
+              sizeLimit: "256Mi"
+          containers:
+            - name: backup-db
+              image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+              imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+              command: ["/app/fusion-index", "backup-db"]
+              {{- with .Values.backend.containerSecurityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+              - name: ephemeral-tmp
+                mountPath: /tmp
+              envFrom:
+                - configMapRef:
+                    name: {{ .Release.Name }}-backend-config
+              env:
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "fusion-index.dbSecretName" . }}
+                      key: password
+                {{- if ne .Values.s3.credentialsType "default" }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "fusion-index.s3SecretName" . }}
+                      key: aws-access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "fusion-index.s3SecretName" . }}
+                      key: aws-secret-access-key
+                {{- end }}
+{{- end }}

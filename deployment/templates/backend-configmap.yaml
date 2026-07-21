@@ -17,6 +17,8 @@ data:
   STORAGE_FS_ROOT:      {{ .Values.backend.persistence.mountPath | default "/data/artifacts" | quote }}
   {{- else }}
   S3_BUCKET:            {{ .Values.s3.bucket | quote }}
+  S3_PREFIX:            {{ include "fusion-index.s3Prefix" . | quote }}
+  S3_BACKUP_PREFIX:     {{ include "fusion-index.s3BackupPrefix" . | quote }}
   AWS_REGION:           {{ .Values.s3.region | quote }}
   S3_ENDPOINT_OVERRIDE: {{ .Values.s3.endpointOverride | default "" | quote }}
   {{- end }}

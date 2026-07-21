@@ -1,0 +1,99 @@
+{{- if and (eq .Values.backend.storageBackend "S3") .Values.s3.migrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-s3-prefix-migration
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fusion-index.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-3"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.s3.migrationJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.s3.migrationJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "fusion-index.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "fusion-index.s3MigrationServiceAccountName" . }}
+      {{- with .Values.backend.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+      - name: ephemeral-tmp
+        emptyDir:
+          sizeLimit: "256Mi"
+      containers:
+        - name: s3-prefix-migration
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: ["/app/fusion-index", "migrate-s3-prefix"]
+          {{- with .Values.backend.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+          - name: ephemeral-tmp
+            mountPath: /tmp
+          # Inlined from Values rather than envFrom: backend-config (like db-secret/
+          # s3-secret) is an ordinary resource, only applied *after* pre-install/
+          # pre-upgrade hooks — see s3-migration-secret.yaml for the same gotcha.
+          env:
+            - name: DB_HOST
+              value: {{ include "fusion-index.dbHost" . | quote }}
+            - name: DB_PORT
+              value: {{ include "fusion-index.dbPort" . | quote }}
+            - name: DB_NAME
+              value: {{ include "fusion-index.dbName" . | quote }}
+            - name: DB_USERNAME
+              value: {{ include "fusion-index.dbUsername" . | quote }}
+            - name: DB_SSLMODE
+              value: {{ .Values.backend.dbSSLMode | default "disable" | quote }}
+            - name: STORAGE_BACKEND
+              value: "S3"
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: S3_PREFIX
+              value: {{ include "fusion-index.s3Prefix" . | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_ENDPOINT_OVERRIDE
+              value: {{ .Values.s3.endpointOverride | default "" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.backend.logLevel | default "info" | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.backend.logFormat | default "json" | quote }}
+            {{- if .Values.postgresql.existingSecret }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.existingSecret }}
+                  key: password
+            {{- else }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fusion-index.s3MigrationSecretName" . }}
+                  key: db-password
+            {{- end }}
+            {{- if ne .Values.s3.credentialsType "default" }}
+            {{- $s3SecretName := .Values.s3.existingSecret | default (include "fusion-index.s3MigrationSecretName" .) }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s3SecretName }}
+                  key: aws-access-key-id
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s3SecretName }}
+                  key: aws-secret-access-key
+            {{- end }}
+            - name: S3_MIGRATION_CONFIGMAP
+              value: {{ include "fusion-index.s3MigrationConfigMapName" . | quote }}
+{{- end }}

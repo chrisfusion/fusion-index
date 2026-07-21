@@ -93,3 +93,50 @@ Resolution order:
   {{- printf "%s-s3-secret" .Release.Name -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+S3 key prefix, resolved. Defaults to "<namespace>/index/data" (this app's own
+sub-path, isolated by the release's Kubernetes namespace) when s3.prefix is left
+empty — every instance gets a collision-free default without manual configuration
+even when multiple instances share one bucket. Set s3.prefix explicitly to override.
+*/}}
+{{- define "fusion-index.s3Prefix" -}}
+{{- .Values.s3.prefix | default (printf "%s/index/data" .Release.Namespace) -}}
+{{- end }}
+
+{{/*
+S3 key prefix for DB backups, resolved. Defaults to "<namespace>/index/backups" —
+independent of fusion-index.s3Prefix (not nested under it) since backups aren't
+artifact data; a sibling of "index/data" under the same "<namespace>/index" root.
+Deriving this by string-manipulating s3.prefix instead would break if s3.prefix is
+overridden to something that doesn't end in "/data". Set s3.backupPrefix to override.
+*/}}
+{{- define "fusion-index.s3BackupPrefix" -}}
+{{- .Values.s3.backupPrefix | default (printf "%s/index/backups" .Release.Namespace) -}}
+{{- end }}
+
+{{/*
+Name of the ConfigMap that tracks the last-applied s3.prefix, read/written by the
+migrate-s3-prefix hook Job.
+*/}}
+{{- define "fusion-index.s3MigrationConfigMapName" -}}
+{{- printf "%s-s3-migration-state" .Release.Name -}}
+{{- end }}
+
+{{/*
+Dedicated ServiceAccount for the migrate-s3-prefix hook Job — deliberately not the
+backend's own ServiceAccount, so the backend Deployment doesn't inherit ConfigMap
+write access it never needs.
+*/}}
+{{- define "fusion-index.s3MigrationServiceAccountName" -}}
+{{- printf "%s-s3-migrate" .Release.Name -}}
+{{- end }}
+
+{{/*
+Name of the hook-scoped Secret holding the DB password / S3 static credentials the
+migrate-s3-prefix Job needs before db-secret/s3-secret (ordinary resources) exist.
+See s3-migration-secret.yaml for why this duplicates rather than reuses them.
+*/}}
+{{- define "fusion-index.s3MigrationSecretName" -}}
+{{- printf "%s-s3-migration-secret" .Release.Name -}}
+{{- end }}

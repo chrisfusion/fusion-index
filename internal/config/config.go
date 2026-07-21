@@ -19,6 +19,8 @@ type Config struct {
 	StorageBackend     string
 	StorageFSRoot      string
 	S3Bucket           string
+	S3Prefix           string
+	S3BackupPrefix     string
 	AWSRegion          string
 	S3EndpointOverride string
 
@@ -50,6 +52,8 @@ func Load() *Config {
 		StorageBackend:     getEnv("STORAGE_BACKEND", "FILESYSTEM"),
 		StorageFSRoot:      getEnv("STORAGE_FS_ROOT", filepath.Join(home, ".fusion-index", "artifacts")),
 		S3Bucket:           getEnv("S3_BUCKET", "fusion-index-artifacts"),
+		S3Prefix:           getEnv("S3_PREFIX", "index"),
+		S3BackupPrefix:     getEnv("S3_BACKUP_PREFIX", "backups"),
 		AWSRegion:          getEnv("AWS_REGION", "us-east-1"),
 		S3EndpointOverride: getEnv("S3_ENDPOINT_OVERRIDE", ""),
 		AuthEnabled:        getEnv("AUTH_ENABLED", "false") == "true",
