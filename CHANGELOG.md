@@ -5,7 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-07-21
 
 ### Added
 - `S3_PREFIX` env var (Helm: `s3.prefix`) — namespaces S3 object keys under a configurable root folder, letting multiple fusion-index instances share a single bucket without colliding. Left unset, the Helm chart defaults it to `<kubernetes-namespace>/index/data` (`fusion-index.s3Prefix` helper) so every instance gets a collision-free default automatically; set `s3.prefix` explicitly to override. The prefix is applied only at the storage layer and is never persisted in `storage_path`, so it can be changed independently of existing DB rows.
