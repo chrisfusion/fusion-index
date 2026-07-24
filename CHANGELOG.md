@@ -96,6 +96,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Complete rewrite from Java/Quarkus to Go 1.25 with Gin, pgx/v5, sqlc, golang-migrate
 - REST API: artifacts, versions, files (multipart upload/download), tags
+- Artifact type taxonomy: `registry_artifact_type` / `registry_artifact_type_map` tables, `/api/v1/types` CRUD, and per-artifact assignment (`GET/PUT/DELETE /api/v1/artifacts/{id}/types...`); artifact list supports filtering by `?type=`
 - Storage backends: filesystem (default) and S3 (aws-sdk-go-v2)
 - K8s SA TokenReview auth middleware
 - Helm chart under `deployment/` with PostgreSQL, S3, auth, ingress, autoscaling values

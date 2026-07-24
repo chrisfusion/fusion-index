@@ -387,6 +387,99 @@ curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions/2.0.0/fil
 
 ---
 
+## Types
+
+Artifact types are a shared taxonomy (e.g. `model`, `pipeline`, `library`) that artifacts can be tagged with, independent of the per-artifact `tag` pointers.
+
+### Create a type
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/api/v1/types \
+  -H "Content-Type: application/json" \
+  -d '{"name":"model","description":"Trained model checkpoints"}' \
+  | python3 -m json.tool
+```
+
+**Expected errors:**
+
+```bash
+# 409 — duplicate type name
+curl -s -X POST http://127.0.0.1:18080/api/v1/types \
+  -H "Content-Type: application/json" \
+  -d '{"name":"model"}' \
+  | python3 -m json.tool
+```
+
+### List / get / update / delete types
+
+```bash
+curl -s http://127.0.0.1:18080/api/v1/types | python3 -m json.tool
+
+curl -s http://127.0.0.1:18080/api/v1/types/1 | python3 -m json.tool
+
+curl -s -X PUT http://127.0.0.1:18080/api/v1/types/1 \
+  -H "Content-Type: application/json" \
+  -d '{"name":"model","description":"Updated description"}' \
+  | python3 -m json.tool
+
+curl -s -X DELETE http://127.0.0.1:18080/api/v1/types/1
+# 204 No Content
+```
+
+### Assign / unassign a type on an artifact
+
+```bash
+# Assign type 1 to artifact $ARTIFACT_ID
+curl -s -X PUT "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/types/1" \
+  | python3 -m json.tool
+
+# List types on an artifact
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/types" | python3 -m json.tool
+
+# Filter artifact list by type
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?type=model" | python3 -m json.tool
+
+# Unassign
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/types/1"
+# 204 No Content
+```
+
+---
+
+## Admin (maintenance)
+
+Bulk inspection/cleanup of abandoned registry data. Every endpoint requires `olderThan` (RFC3339 timestamp); artifacts/versions carrying the tag configured via `ADMIN_PROTECTED_TAG` (default `protect`) are skipped by delete operations.
+
+```bash
+# Artifacts with no versions
+curl -s "http://127.0.0.1:18080/api/v1/admin/artifacts/empty?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/artifacts/empty?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+# {"deleted": N, "skipped": M}
+
+# Versions with no files
+curl -s "http://127.0.0.1:18080/api/v1/admin/versions/empty?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/versions/empty?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+
+# Artifacts whose versions all have no files (cascades)
+curl -s "http://127.0.0.1:18080/api/v1/admin/artifacts/no-files?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/artifacts/no-files?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+```
+
+**Expected errors:**
+
+```bash
+# 400 — missing olderThan
+curl -s "http://127.0.0.1:18080/api/v1/admin/artifacts/empty" | python3 -m json.tool
+```
+
+---
+
 ## End-to-end workflow
 
 Create an artifact, publish two versions with tags, upload a file, then resolve by tag.

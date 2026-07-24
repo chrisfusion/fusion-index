@@ -42,7 +42,7 @@ internal/
     ├── router.go               # gin setup, routes, CORS
     ├── openapi/
     │   ├── handler.go          # //go:embed openapi.yaml; serves spec + Swagger UI
-    │   └── openapi.yaml        # hand-written OpenAPI 3.1 spec (all 18 ops)
+    │   └── openapi.yaml        # hand-written OpenAPI 3.1 spec (all 32 ops)
     ├── middleware/
     │   └── auth.go             # Gin middleware: K8s SA token validation via TokenReview API, uses internal/k8sclient
     ├── handlers/
@@ -50,6 +50,8 @@ internal/
     │   ├── versions.go         # CRUD on registry_artifact_version + tag-on-create
     │   ├── files.go            # multipart upload / download / delete
     │   ├── tags.go             # PUT/DELETE tags (upsert moves tag)
+    │   ├── types.go             # CRUD on registry_artifact_type + artifact type assignment (M:N)
+    │   ├── admin.go             # bulk cleanup of empty/file-less artifacts & versions
     │   ├── metrics.go          # GET /q/metrics — loads Snapshot via metrics.Cache
     │   └── helpers.go          # pathID, pathFileID, pathSemver, isUniqueViolation, isNotFound
     └── dto/
@@ -98,7 +100,7 @@ sqlc.yaml                       # sqlc config
 
 | Method | Path | Description |
 |---|---|---|
-| GET/POST | `/api/v1/artifacts` | List (filter `?name=` prefix, `?tag=`) / create |
+| GET/POST | `/api/v1/artifacts` | List (filter `?name=` prefix, `?tag=`, `?type=` repeatable) / create |
 | GET/PUT/DELETE | `/api/v1/artifacts/{id}` | Get / update description / delete artifact |
 | GET/POST | `/api/v1/artifacts/{id}/versions` | List / create version (body: `version`, `config`, `tags[]`) |
 | GET/DELETE | `/api/v1/artifacts/{id}/versions/{semver}` | Get / delete version |
@@ -107,6 +109,10 @@ sqlc.yaml                       # sqlc config
 | GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | File metadata |
 | GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}/download` | Download stream |
 | DELETE | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | Delete file |
+| GET/POST | `/api/v1/types` | List / create artifact type |
+| GET/PUT/DELETE | `/api/v1/types/{typeId}` | Get / update / delete type |
+| GET/PUT/DELETE | `/api/v1/artifacts/{id}/types/{typeId}` (+GET on `/types`) | List / assign / unassign type on an artifact |
+| GET/DELETE | `/api/v1/admin/artifacts/empty`, `/admin/versions/empty`, `/admin/artifacts/no-files` | List / bulk-delete abandoned data (requires `?olderThan=`, skips `ADMIN_PROTECTED_TAG`) |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
 | GET | `/q/metrics` | Registry aggregate metrics (TTL-cached, always public) |
 | GET | `/api/openapi.json` | OpenAPI 3.1 spec as JSON |
@@ -238,6 +244,7 @@ Reference implementations: `../fusion-forge/internal/api/middleware/logging.go`,
 
 ## Changelog
 Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the work is considered done. Follow the existing format: add an entry under `## [Unreleased]` or create a new `## [x.y.z] — YYYY-MM-DD` section.
+- **README.md/API_ARCHITECTURE.md/EXAMPLES.md drift silently:** unlike `openapi.yaml` (embedded + served, effectively self-checking), these are hand-maintained prose with nothing enforcing sync. The Types and Admin APIs shipped fully coded and in `openapi.yaml` but went undocumented in all three — and in this file's own REST API table above — for months. When adding an endpoint, grep all four for existing resource names before calling the work done.
 
 ## Branch Strategy
 `main` → `develop` → `feature/*`

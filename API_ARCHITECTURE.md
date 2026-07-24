@@ -191,6 +191,22 @@ registry_artifact_tag
   created_at   TIMESTAMPTZ
   updated_at   TIMESTAMPTZ
   UNIQUE (artifact_id, tag)                          ← tag is unique per artifact
+
+registry_artifact_type
+  id           BIGINT   PK
+  name         VARCHAR(255)  UNIQUE NOT NULL          ← shared taxonomy, e.g. "model", "pipeline"
+  description  TEXT
+  created_at   TIMESTAMPTZ
+  updated_at   TIMESTAMPTZ
+       │
+       │  M : N (via registry_artifact_type_map)
+       ▼
+registry_artifact_type_map
+  id           BIGINT   PK
+  artifact_id  BIGINT   FK → registry_artifact.id       ON DELETE CASCADE
+  type_id      BIGINT   FK → registry_artifact_type.id  ON DELETE CASCADE
+  created_at   TIMESTAMPTZ
+  UNIQUE (artifact_id, type_id)
 ```
 
 Key design decisions:
@@ -200,6 +216,7 @@ Key design decisions:
 - **Storage path includes file ID** — `{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}` guarantees storage-key uniqueness even if a file with the same name is re-uploaded after deletion.
 - **Tag upsert** — `ON CONFLICT (artifact_id, tag) DO UPDATE SET version_id = EXCLUDED.version_id` atomically moves a tag with no application-side conflict check.
 - **Cascade deletes** — deleting an artifact removes all versions, files, and tags automatically at the DB level; the version DELETE handler also performs best-effort storage cleanup before removing the version row.
+- **Types are M:N via a join table** — `registry_artifact_type_map` lets one artifact carry multiple types and one type apply to many artifacts, unlike the artifact ↔ tag relationship which is per-artifact-unique.
 
 ---
 
@@ -211,7 +228,7 @@ Key design decisions:
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
-| `GET` | `/artifacts` | 200 | List (paginated); filter `?name=` prefix or `?tag=` |
+| `GET` | `/artifacts` | 200 | List (paginated); filter `?name=` prefix, `?tag=`, or `?type=` (repeatable) |
 | `POST` | `/artifacts` | 201, 400, 409 | Create |
 | `GET` | `/artifacts/{id}` | 200, 404 | Get by ID |
 | `PUT` | `/artifacts/{id}` | 200, 400, 404 | Update description |
@@ -242,6 +259,34 @@ Key design decisions:
 | `GET` | `/artifacts/{id}/versions/{semver}/files/{fileId}` | 200, 404 | File metadata |
 | `GET` | `/artifacts/{id}/versions/{semver}/files/{fileId}/download` | 200, 404 | Download stream |
 | `DELETE` | `/artifacts/{id}/versions/{semver}/files/{fileId}` | 204, 404 | Delete file + storage object |
+
+#### Types
+
+Shared artifact taxonomy (e.g. `model`, `pipeline`, `library`), independent of the per-artifact `tag` pointers. `registry_artifact_type_map` is M:N — one artifact can carry multiple types.
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/types` | 200 | List all types |
+| `POST` | `/types` | 201, 400, 409 | Create |
+| `GET` | `/types/{typeId}` | 200, 404 | Get |
+| `PUT` | `/types/{typeId}` | 200, 400, 404, 409 | Update name/description |
+| `DELETE` | `/types/{typeId}` | 204, 404 | Delete (cascades assignments) |
+| `GET` | `/artifacts/{id}/types` | 200, 404 | List types assigned to an artifact |
+| `PUT` | `/artifacts/{id}/types/{typeId}` | 200, 404 | Assign a type to an artifact |
+| `DELETE` | `/artifacts/{id}/types/{typeId}` | 204, 404 | Unassign |
+
+#### Admin
+
+Maintenance endpoints for inspecting/cleaning up abandoned registry data (`internal/api/handlers/admin.go`). Every endpoint requires `?olderThan=` (RFC3339); delete endpoints skip items tagged with `ADMIN_PROTECTED_TAG` (default `protect`) and return `{"deleted": N, "skipped": M}`.
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/admin/artifacts/empty` | 200, 400 | List artifacts with no versions (paginated) |
+| `DELETE` | `/admin/artifacts/empty` | 200, 400 | Bulk delete empty artifacts |
+| `GET` | `/admin/versions/empty` | 200, 400 | List versions with no files (paginated) |
+| `DELETE` | `/admin/versions/empty` | 200, 400 | Bulk delete file-less versions |
+| `GET` | `/admin/artifacts/no-files` | 200, 400 | List artifacts whose versions have no files (paginated) |
+| `DELETE` | `/admin/artifacts/no-files` | 200, 400 | Bulk delete such artifacts and their versions (cascade) |
 
 #### Pagination
 
