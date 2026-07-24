@@ -19,7 +19,17 @@ func NewS3Client(ctx context.Context, region, endpointOverride string) (*s3.Clie
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
-	var opts []func(*s3.Options)
+	opts := []func(*s3.Options){
+		// aws-sdk-go-v2's default-integrity-protections feature (request/response
+		// checksums on by default) sends PutObject bodies as aws-chunked with trailing
+		// CRC32 checksums. MinIO mishandles that chunk framing (observed as chunk-size
+		// errors on upload), so pin both to "when required" to restore pre-default-CRC
+		// behavior — plain, non-chunked bodies unless a checksum is explicitly requested.
+		func(o *s3.Options) {
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		},
+	}
 	if endpointOverride != "" {
 		ep := endpointOverride
 		opts = append(opts, func(o *s3.Options) {

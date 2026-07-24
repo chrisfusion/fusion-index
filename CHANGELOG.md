@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.1] — 2026-07-24
+
+### Fixed
+- S3 uploads against MinIO could fail with chunk-size errors after the aws-sdk-go-v2 bump: the SDK's newer default-integrity-protections feature sends `PutObject` bodies as `aws-chunked` with a trailing CRC32 checksum, and MinIO doesn't handle that chunk framing correctly. `NewS3Client` (`internal/storage/s3.go`) now pins `RequestChecksumCalculation`/`ResponseChecksumValidation` to `...WhenRequired`, restoring plain non-chunked request bodies unless a checksum is explicitly requested. Applies to every caller (server, `backup-db`, `restore-db`, `migrate-s3-prefix`) since they all share this constructor.
+
 ## [0.5.0] — 2026-07-21
 
 ### Added
