@@ -50,3 +50,7 @@ deployment/charts/*.tgz
 .env.*
 *.log
 .DS_Store
+
+# Claude Code (local)
+.claude/
+.claude.local.md
