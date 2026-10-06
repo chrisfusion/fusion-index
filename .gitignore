@@ -3,8 +3,6 @@ fusion-index
 /bin/
 /dist/
 
-# Go modules download cache (local vendor alternative)
-/vendor/
 
 # Go test cache and coverage
 *.test

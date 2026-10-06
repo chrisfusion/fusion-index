@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- Vendored Go dependencies (`vendor/`, ~51 MB on disk) because the CI environment that builds the images has no internet access: `make vendor` refreshes it, `make check-vendor` fails on drift, the Makefile targets and the Dockerfile build with `-mod=vendor` (no more `go mod download`). `vendor/` is marked `-diff linguist-vendored` in `.gitattributes`; added a minimal `Makefile` for these targets, removed the `vendor/` ignore rule and the unneeded `apk add git` from the build stage. Outside Docker the Go 1.25 toolchain must already be installed (use `GOTOOLCHAIN=local`)
+
 ## [0.5.1] — 2026-07-24
 
 ### Fixed

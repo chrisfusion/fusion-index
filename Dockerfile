@@ -2,13 +2,14 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /build
 
-RUN apk add --no-cache git
-
 COPY go.mod go.sum ./
-RUN go mod download
+# Dependencies are vendored (offline builds): no `go mod download`.
+COPY vendor/ vendor/
 
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o fusion-index ./cmd/server
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY migrations/ migrations/
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -o fusion-index ./cmd/server
 
 # Stage 2: Runtime
 FROM alpine:3.19

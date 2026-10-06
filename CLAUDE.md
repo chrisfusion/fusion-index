@@ -118,6 +118,10 @@ sqlc.yaml                       # sqlc config
 | GET | `/api/openapi.json` | OpenAPI 3.1 spec as JSON |
 | GET | `/swagger/` | Swagger UI (assets from CDN, HTML embedded in binary) |
 
+## Vendoring (offline builds)
+
+Go dependencies are vendored and committed (`vendor/`, ~51 MB on disk) because the CI environment that builds the images has no internet access (builds must not download anything). The Makefile targets and the Dockerfile use `-mod=vendor` (the Dockerfile has no `go mod download`). After any `go.mod` change run `make vendor` and commit `vendor/` with `go.mod`/`go.sum`; `make check-vendor` fails on drift. `vendor/**` is `-diff linguist-vendored` in `.gitattributes`. The runtime stage still runs `apk add ca-certificates postgresql16-client`, which needs an Alpine package mirror (not a Go dependency, so vendoring does not cover it); the unused `apk add git` was dropped from the build stage. Remaining external inputs: the Docker base images (`golang:1.25-alpine`, `alpine:3.19`) — mirror them in an internal registry or `docker save`/`docker load` them. Outside Docker the pinned Go toolchain must be installed (`GOTOOLCHAIN=local`). Verify with `docker build --network none .`. Blueprint: `docs/go-vendoring-blueprint.md`.
+
 ## Environment Variables
 
 | Variable | Default | Description |
