@@ -255,3 +255,7 @@ Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the
 
 ## Commit Style
 Conventional Commits: `feat:`, `fix:`, `chore:`, `refactor:`
+
+## Multi-tenancy / ownership
+
+Cross-project plan (owner groups, trusted headers `X-User-Groups` etc., migration, rollout): `../fusion-shared/docs/multi-tenancy.md` — read it before touching ownership, groups or the `X-User-*` headers.
