@@ -79,13 +79,13 @@ backend:
   podLabels: {}
 
   # Pod-level security context (spec.securityContext).
-  # Applied to all containers in the pod.
-  # Example:
-  #   podSecurityContext:
-  #     runAsNonRoot: true
-  #     runAsUser: 1000
-  #     fsGroup: 2000
-  podSecurityContext: {}
+  # Applied to the backend Deployment and the backup CronJob. Matches the image's
+  # distroless nonroot user; fsGroup makes the artifacts PVC writable for it.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
 
   # Container-level security context (spec.containers[].securityContext).
   # Example:

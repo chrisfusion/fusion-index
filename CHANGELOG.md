@@ -10,6 +10,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Vendored Go dependencies (`vendor/`, ~51 MB on disk) because the CI environment that builds the images has no internet access: `make vendor` refreshes it, `make check-vendor` fails on drift, the Makefile targets and the Dockerfile build with `-mod=vendor` (no more `go mod download`). `vendor/` is marked `-diff linguist-vendored` in `.gitattributes`; added a minimal `Makefile` for these targets, removed the `vendor/` ignore rule and the unneeded `apk add git` from the build stage. Outside Docker the Go 1.25 toolchain must already be installed (use `GOTOOLCHAIN=local`)
 
+### Changed
+- **No Alpine anymore:** build stage `golang:1.25-trixie`, runtime distroless `gcr.io/distroless/base-debian13:nonroot` (no shell, no package manager; 94 MB), running as UID/GID 65532 — `backend.podSecurityContext` now defaults to those IDs plus `fsGroup: 65532`; a PVC holding files written by the old root image needs a chown or reset. `pg_dump`/`psql` 18 are copied with their shared libraries from the official `postgres:18-trixie` image (`PG_MAJOR` build arg) instead of `apk add postgresql16-client`
+
+### Fixed
+- **`backup-db` against Postgres 18:** pg_dump 16 aborted with "server version mismatch" against the Bitnami `postgresql:latest` (18) server
+- **`restore-db` into Postgres < 17:** the `SET transaction_timeout = 0;` line that pg_dump >= 17 writes is dropped from the dump preamble before it reaches psql
+- **`values-dev.yaml`** pointed at a non-existent `postgresql.fusion.svc.cluster.local`; it now targets the per-namespace dev Postgres `fusion-index-postgresql` (user `fusion` as admin)
+- **`createDatabaseJob`** passes the database name to psql via stdin (`:'target'` is never substituted inside `psql -c`) and quotes it server-side with `format('%I')` instead of interpolating it into the SQL (chart 0.5.2)
+
 ## [0.5.1] — 2026-07-24
 
 ### Fixed

@@ -26,10 +26,13 @@ backend:
     size: 5Gi   # minikube hostPath provisioner — survives pod restarts, not minikube delete
 
 postgresql:
-  host: postgresql.fusion.svc.cluster.local   # pre-installed Postgres shared in the fusion namespace
+  # Per-namespace dev Postgres (Deployment+Service+Secret, user fusion is superuser),
+  # applied before this chart — see fusion-fleet's projects/fusion/dev/instance_*/
+  # fusion-index-postgresql.yaml. fusion-bff's fusion_bff database lives on it too.
+  host: fusion-index-postgresql
   password: "devpass"
   admin:
-    username: postgres
+    username: fusion
     password: "devpass"
 
 # s3 block intentionally omitted — storageBackend=FILESYSTEM skips all S3 wiring

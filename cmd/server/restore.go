@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,10 +81,16 @@ func runRestoreDB() {
 	}
 	defer gz.Close()
 
+	dump, err := stripIncompatibleSettings(gz)
+	if err != nil {
+		slog.Error("read backup preamble", "key", key, "error", err)
+		os.Exit(1)
+	}
+
 	args := append(pgConnArgs(cfg), "-v", "ON_ERROR_STOP=1", "-f", "-")
 	cmd := exec.CommandContext(ctx, "psql", args...)
 	cmd.Env = pgEnv(cfg)
-	cmd.Stdin = gz
+	cmd.Stdin = dump
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -92,6 +101,47 @@ func runRestoreDB() {
 	}
 
 	slog.Info("database restore complete", "key", key)
+}
+
+// transactionTimeoutSetting is emitted by pg_dump >= 17 into every plain dump, but
+// servers < 17 reject it as an unknown parameter — which aborts the whole restore
+// under ON_ERROR_STOP, e.g. when the image's newer pg_dump backed up an older server.
+// It's a session setting only, so dropping it doesn't change what gets restored.
+const transactionTimeoutSetting = "SET transaction_timeout = 0;"
+
+// stripIncompatibleSettings drops transactionTimeoutSetting from the preamble of a
+// plain-format pg_dump stream. Only the preamble (comments, blank lines, \restrict,
+// SET and set_config lines) is inspected; everything from the first other statement
+// on passes through untouched, so table data can never be altered.
+func stripIncompatibleSettings(r io.Reader) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	var head bytes.Buffer
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		stmt := strings.TrimSpace(line)
+		if !isDumpPreamble(stmt) {
+			head.WriteString(line)
+			break
+		}
+		if stmt != transactionTimeoutSetting {
+			head.WriteString(line)
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	return io.MultiReader(&head, br), nil
+}
+
+func isDumpPreamble(stmt string) bool {
+	return stmt == "" ||
+		strings.HasPrefix(stmt, "--") ||
+		strings.HasPrefix(stmt, `\restrict `) ||
+		strings.HasPrefix(stmt, "SET ") ||
+		strings.HasPrefix(stmt, "SELECT pg_catalog.set_config(")
 }
 
 // targetHasData reports whether the target database already has artifacts — used to
