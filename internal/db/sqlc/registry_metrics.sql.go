@@ -42,6 +42,21 @@ func (q *Queries) CountArtifactsByType(ctx context.Context) ([]CountArtifactsByT
 	return items, nil
 }
 
+const countArtifactsWithVersionsButNoFiles = `-- name: CountArtifactsWithVersionsButNoFiles :one
+SELECT COUNT(*) FROM registry_artifact ra
+WHERE ra.version_count > 0
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_version v
+                  JOIN registry_artifact_file f ON f.version_id = v.id
+                  WHERE v.artifact_id = ra.id)
+`
+
+func (q *Queries) CountArtifactsWithVersionsButNoFiles(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countArtifactsWithVersionsButNoFiles)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countArtifactsWithoutTags = `-- name: CountArtifactsWithoutTags :one
 SELECT COUNT(*) FROM registry_artifact ra
 WHERE NOT EXISTS (
@@ -65,6 +80,19 @@ WHERE NOT EXISTS (
 
 func (q *Queries) CountArtifactsWithoutVersions(ctx context.Context) (int64, error) {
 	row := q.db.QueryRow(ctx, countArtifactsWithoutVersions)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countBrokenTags = `-- name: CountBrokenTags :one
+SELECT COUNT(*) FROM registry_artifact_tag rat
+WHERE NOT EXISTS (SELECT 1 FROM registry_artifact_file f
+                  WHERE f.version_id = rat.version_id AND f.status = 'AVAILABLE')
+`
+
+func (q *Queries) CountBrokenTags(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countBrokenTags)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -123,6 +151,41 @@ func (q *Queries) CountRegistryVersions(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const countRetentionPolicies = `-- name: CountRetentionPolicies :one
+SELECT COUNT(*) FROM registry_retention_policy
+`
+
+func (q *Queries) CountRetentionPolicies(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countRetentionPolicies)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countUnusedTypes = `-- name: CountUnusedTypes :one
+SELECT COUNT(*) FROM registry_artifact_type t
+WHERE NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id)
+`
+
+func (q *Queries) CountUnusedTypes(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnusedTypes)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countVersionsWithoutAnyFiles = `-- name: CountVersionsWithoutAnyFiles :one
+SELECT COUNT(*) FROM registry_artifact_version v
+WHERE NOT EXISTS (SELECT 1 FROM registry_artifact_file f WHERE f.version_id = v.id)
+`
+
+func (q *Queries) CountVersionsWithoutAnyFiles(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countVersionsWithoutAnyFiles)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const sumRegistryStorageBytes = `-- name: SumRegistryStorageBytes :one
 SELECT COALESCE(SUM(size_bytes), 0)::bigint AS total_storage_bytes
 FROM registry_artifact_file
@@ -134,4 +197,37 @@ func (q *Queries) SumRegistryStorageBytes(ctx context.Context) (int64, error) {
 	var total_storage_bytes int64
 	err := row.Scan(&total_storage_bytes)
 	return total_storage_bytes, err
+}
+
+const sumStorageBytesByBackend = `-- name: SumStorageBytesByBackend :many
+SELECT storage_backend, COALESCE(SUM(size_bytes), 0)::bigint AS total_bytes
+FROM registry_artifact_file
+WHERE status = 'AVAILABLE'
+GROUP BY storage_backend
+ORDER BY storage_backend
+`
+
+type SumStorageBytesByBackendRow struct {
+	StorageBackend string `json:"storage_backend"`
+	TotalBytes     int64  `json:"total_bytes"`
+}
+
+func (q *Queries) SumStorageBytesByBackend(ctx context.Context) ([]SumStorageBytesByBackendRow, error) {
+	rows, err := q.db.Query(ctx, sumStorageBytesByBackend)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SumStorageBytesByBackendRow
+	for rows.Next() {
+		var i SumStorageBytesByBackendRow
+		if err := rows.Scan(&i.StorageBackend, &i.TotalBytes); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

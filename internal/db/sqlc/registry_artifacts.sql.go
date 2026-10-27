@@ -53,40 +53,64 @@ func (q *Queries) CountRegistryArtifacts(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-const countRegistryArtifactsByName = `-- name: CountRegistryArtifactsByName :one
-SELECT COUNT(*) FROM registry_artifact
-WHERE full_name ILIKE $1
-`
-
-func (q *Queries) CountRegistryArtifactsByName(ctx context.Context, fullName string) (int64, error) {
-	row := q.db.QueryRow(ctx, countRegistryArtifactsByName, fullName)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
-const countRegistryArtifactsByTag = `-- name: CountRegistryArtifactsByTag :one
+const countRegistryArtifactsFiltered = `-- name: CountRegistryArtifactsFiltered :one
 SELECT COUNT(*) FROM registry_artifact ra
-JOIN registry_artifact_tag rat ON rat.artifact_id = ra.id
-WHERE rat.tag = $1
+WHERE ($1::text IS NULL OR ra.full_name ILIKE $1::text || '%')
+  AND ($2::text IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = ra.id AND rat.tag = $2::text))
+  AND ($3::text[] IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_type_map ratm
+                  JOIN registry_artifact_type rty ON rty.id = ratm.type_id
+                  WHERE ratm.artifact_id = ra.id AND rty.name = ANY($3::text[])))
+  AND ($4::timestamptz IS NULL OR ra.created_at < $4::timestamptz)
+  AND ($5::int IS NULL OR ra.version_count >= $5::int)
+  AND ($6::int IS NULL OR ra.version_count <= $6::int)
+  AND ($7::bool IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_version rav
+                  JOIN registry_artifact_file raf ON raf.version_id = rav.id
+                  WHERE rav.artifact_id = ra.id) = $7::bool)
+  AND ($8::bool IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_version rav
+                  JOIN registry_artifact_file raf ON raf.version_id = rav.id
+                  WHERE rav.artifact_id = ra.id AND raf.status IN ('PENDING', 'ERROR')) = $8::bool)
+  AND ($9::text IS NULL
+       OR NOT EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = ra.id AND rat.tag = $9::text))
+  AND ($10::bigint IS NULL OR ra.total_bytes >= $10::bigint)
+  AND ($11::bool IS NULL
+       OR (EXISTS (SELECT 1 FROM registry_retention_policy rp WHERE rp.artifact_id = ra.id)
+           OR EXISTS (SELECT 1 FROM registry_artifact_type_map ratm
+                      JOIN registry_retention_policy rp ON rp.type_id = ratm.type_id
+                      WHERE ratm.artifact_id = ra.id)) = $11::bool)
 `
 
-func (q *Queries) CountRegistryArtifactsByTag(ctx context.Context, tag string) (int64, error) {
-	row := q.db.QueryRow(ctx, countRegistryArtifactsByTag, tag)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
+type CountRegistryArtifactsFilteredParams struct {
+	NamePrefix         *string            `json:"name_prefix"`
+	Tag                *string            `json:"tag"`
+	Types              []string           `json:"types"`
+	OlderThan          pgtype.Timestamptz `json:"older_than"`
+	MinVersions        *int32             `json:"min_versions"`
+	MaxVersions        *int32             `json:"max_versions"`
+	HasFiles           *bool              `json:"has_files"`
+	HasIncompleteFiles *bool              `json:"has_incomplete_files"`
+	MissingTag         *string            `json:"missing_tag"`
+	MinTotalBytes      *int64             `json:"min_total_bytes"`
+	HasRetention       *bool              `json:"has_retention"`
 }
 
-const countRegistryArtifactsByTypes = `-- name: CountRegistryArtifactsByTypes :one
-SELECT COUNT(DISTINCT ra.id) FROM registry_artifact ra
-JOIN registry_artifact_type_map ratm ON ratm.artifact_id = ra.id
-JOIN registry_artifact_type rat ON rat.id = ratm.type_id
-WHERE rat.name = ANY($1::text[])
-`
-
-func (q *Queries) CountRegistryArtifactsByTypes(ctx context.Context, dollar_1 []string) (int64, error) {
-	row := q.db.QueryRow(ctx, countRegistryArtifactsByTypes, dollar_1)
+func (q *Queries) CountRegistryArtifactsFiltered(ctx context.Context, arg CountRegistryArtifactsFilteredParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countRegistryArtifactsFiltered,
+		arg.NamePrefix,
+		arg.Tag,
+		arg.Types,
+		arg.OlderThan,
+		arg.MinVersions,
+		arg.MaxVersions,
+		arg.HasFiles,
+		arg.HasIncompleteFiles,
+		arg.MissingTag,
+		arg.MinTotalBytes,
+		arg.HasRetention,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -95,7 +119,7 @@ func (q *Queries) CountRegistryArtifactsByTypes(ctx context.Context, dollar_1 []
 const createRegistryArtifact = `-- name: CreateRegistryArtifact :one
 INSERT INTO registry_artifact (full_name, description)
 VALUES ($1, $2)
-RETURNING id, full_name, description, created_at, updated_at
+RETURNING id, full_name, description, created_at, updated_at, version_count, largest_version_bytes, total_bytes
 `
 
 type CreateRegistryArtifactParams struct {
@@ -112,6 +136,9 @@ func (q *Queries) CreateRegistryArtifact(ctx context.Context, arg CreateRegistry
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VersionCount,
+		&i.LargestVersionBytes,
+		&i.TotalBytes,
 	)
 	return i, err
 }
@@ -171,7 +198,7 @@ func (q *Queries) DeleteRegistryArtifact(ctx context.Context, id int64) error {
 }
 
 const getRegistryArtifact = `-- name: GetRegistryArtifact :one
-SELECT id, full_name, description, created_at, updated_at FROM registry_artifact WHERE id = $1
+SELECT id, full_name, description, created_at, updated_at, version_count, largest_version_bytes, total_bytes FROM registry_artifact WHERE id = $1
 `
 
 func (q *Queries) GetRegistryArtifact(ctx context.Context, id int64) (RegistryArtifact, error) {
@@ -183,12 +210,15 @@ func (q *Queries) GetRegistryArtifact(ctx context.Context, id int64) (RegistryAr
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VersionCount,
+		&i.LargestVersionBytes,
+		&i.TotalBytes,
 	)
 	return i, err
 }
 
 const getRegistryArtifactByName = `-- name: GetRegistryArtifactByName :one
-SELECT id, full_name, description, created_at, updated_at FROM registry_artifact WHERE full_name = $1
+SELECT id, full_name, description, created_at, updated_at, version_count, largest_version_bytes, total_bytes FROM registry_artifact WHERE full_name = $1
 `
 
 func (q *Queries) GetRegistryArtifactByName(ctx context.Context, fullName string) (RegistryArtifact, error) {
@@ -200,12 +230,15 @@ func (q *Queries) GetRegistryArtifactByName(ctx context.Context, fullName string
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VersionCount,
+		&i.LargestVersionBytes,
+		&i.TotalBytes,
 	)
 	return i, err
 }
 
 const listArtifactsWithoutFiles = `-- name: ListArtifactsWithoutFiles :many
-SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
+SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at, ra.version_count, ra.largest_version_bytes, ra.total_bytes FROM registry_artifact ra
 WHERE ra.created_at < $1
   AND EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
   AND NOT EXISTS (
@@ -238,6 +271,9 @@ func (q *Queries) ListArtifactsWithoutFiles(ctx context.Context, arg ListArtifac
 			&i.Description,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.VersionCount,
+			&i.LargestVersionBytes,
+			&i.TotalBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -250,7 +286,7 @@ func (q *Queries) ListArtifactsWithoutFiles(ctx context.Context, arg ListArtifac
 }
 
 const listEmptyArtifacts = `-- name: ListEmptyArtifacts :many
-SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
+SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at, ra.version_count, ra.largest_version_bytes, ra.total_bytes FROM registry_artifact ra
 WHERE ra.created_at < $1
   AND NOT EXISTS (SELECT 1 FROM registry_artifact_version rav WHERE rav.artifact_id = ra.id)
 ORDER BY ra.created_at DESC
@@ -278,6 +314,9 @@ func (q *Queries) ListEmptyArtifacts(ctx context.Context, arg ListEmptyArtifacts
 			&i.Description,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.VersionCount,
+			&i.LargestVersionBytes,
+			&i.TotalBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -289,19 +328,88 @@ func (q *Queries) ListEmptyArtifacts(ctx context.Context, arg ListEmptyArtifacts
 	return items, nil
 }
 
-const listRegistryArtifacts = `-- name: ListRegistryArtifacts :many
-SELECT id, full_name, description, created_at, updated_at FROM registry_artifact
-ORDER BY created_at DESC
-LIMIT $1 OFFSET $2
+const listRegistryArtifactsFiltered = `-- name: ListRegistryArtifactsFiltered :many
+SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at, ra.version_count, ra.largest_version_bytes, ra.total_bytes FROM registry_artifact ra
+WHERE ($1::text IS NULL OR ra.full_name ILIKE $1::text || '%')
+  AND ($2::text IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = ra.id AND rat.tag = $2::text))
+  AND ($3::text[] IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_type_map ratm
+                  JOIN registry_artifact_type rty ON rty.id = ratm.type_id
+                  WHERE ratm.artifact_id = ra.id AND rty.name = ANY($3::text[])))
+  AND ($4::timestamptz IS NULL OR ra.created_at < $4::timestamptz)
+  AND ($5::int IS NULL OR ra.version_count >= $5::int)
+  AND ($6::int IS NULL OR ra.version_count <= $6::int)
+  AND ($7::bool IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_version rav
+                  JOIN registry_artifact_file raf ON raf.version_id = rav.id
+                  WHERE rav.artifact_id = ra.id) = $7::bool)
+  AND ($8::bool IS NULL
+       OR EXISTS (SELECT 1 FROM registry_artifact_version rav
+                  JOIN registry_artifact_file raf ON raf.version_id = rav.id
+                  WHERE rav.artifact_id = ra.id AND raf.status IN ('PENDING', 'ERROR')) = $8::bool)
+  AND ($9::text IS NULL
+       OR NOT EXISTS (SELECT 1 FROM registry_artifact_tag rat WHERE rat.artifact_id = ra.id AND rat.tag = $9::text))
+  AND ($10::bigint IS NULL OR ra.total_bytes >= $10::bigint)
+  AND ($11::bool IS NULL
+       OR (EXISTS (SELECT 1 FROM registry_retention_policy rp WHERE rp.artifact_id = ra.id)
+           OR EXISTS (SELECT 1 FROM registry_artifact_type_map ratm
+                      JOIN registry_retention_policy rp ON rp.type_id = ratm.type_id
+                      WHERE ratm.artifact_id = ra.id)) = $11::bool)
+ORDER BY
+  CASE WHEN $12::text = 'name'           AND $13::bool     THEN ra.full_name END DESC,
+  CASE WHEN $12::text = 'name'           AND NOT $13::bool THEN ra.full_name END ASC,
+  CASE WHEN $12::text = 'versionCount'   AND $13::bool     THEN ra.version_count END DESC,
+  CASE WHEN $12::text = 'versionCount'   AND NOT $13::bool THEN ra.version_count END ASC,
+  CASE WHEN $12::text = 'largestVersion' AND $13::bool     THEN ra.largest_version_bytes END DESC,
+  CASE WHEN $12::text = 'largestVersion' AND NOT $13::bool THEN ra.largest_version_bytes END ASC,
+  CASE WHEN $12::text = 'totalSize'      AND $13::bool     THEN ra.total_bytes END DESC,
+  CASE WHEN $12::text = 'totalSize'      AND NOT $13::bool THEN ra.total_bytes END ASC,
+  CASE WHEN $13::bool     THEN ra.created_at END DESC,
+  CASE WHEN NOT $13::bool THEN ra.created_at END ASC,
+  ra.id
+LIMIT $15::int OFFSET $14::int
 `
 
-type ListRegistryArtifactsParams struct {
-	Limit  int32 `json:"limit"`
-	Offset int32 `json:"offset"`
+type ListRegistryArtifactsFilteredParams struct {
+	NamePrefix         *string            `json:"name_prefix"`
+	Tag                *string            `json:"tag"`
+	Types              []string           `json:"types"`
+	OlderThan          pgtype.Timestamptz `json:"older_than"`
+	MinVersions        *int32             `json:"min_versions"`
+	MaxVersions        *int32             `json:"max_versions"`
+	HasFiles           *bool              `json:"has_files"`
+	HasIncompleteFiles *bool              `json:"has_incomplete_files"`
+	MissingTag         *string            `json:"missing_tag"`
+	MinTotalBytes      *int64             `json:"min_total_bytes"`
+	HasRetention       *bool              `json:"has_retention"`
+	Sort               string             `json:"sort"`
+	SortDesc           bool               `json:"sort_desc"`
+	RowOffset          int32              `json:"row_offset"`
+	RowLimit           int32              `json:"row_limit"`
 }
 
-func (q *Queries) ListRegistryArtifacts(ctx context.Context, arg ListRegistryArtifactsParams) ([]RegistryArtifact, error) {
-	rows, err := q.db.Query(ctx, listRegistryArtifacts, arg.Limit, arg.Offset)
+// Artifact list for GET /api/v1/artifacts: every NULL filter is ignored, the rest
+// combine with AND. Keep the WHERE clause identical to CountRegistryArtifactsFiltered.
+// version_count / largest_version_bytes / total_bytes are trigger-maintained (migration 000009).
+func (q *Queries) ListRegistryArtifactsFiltered(ctx context.Context, arg ListRegistryArtifactsFilteredParams) ([]RegistryArtifact, error) {
+	rows, err := q.db.Query(ctx, listRegistryArtifactsFiltered,
+		arg.NamePrefix,
+		arg.Tag,
+		arg.Types,
+		arg.OlderThan,
+		arg.MinVersions,
+		arg.MaxVersions,
+		arg.HasFiles,
+		arg.HasIncompleteFiles,
+		arg.MissingTag,
+		arg.MinTotalBytes,
+		arg.HasRetention,
+		arg.Sort,
+		arg.SortDesc,
+		arg.RowOffset,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -315,126 +423,9 @@ func (q *Queries) ListRegistryArtifacts(ctx context.Context, arg ListRegistryArt
 			&i.Description,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRegistryArtifactsByName = `-- name: ListRegistryArtifactsByName :many
-SELECT id, full_name, description, created_at, updated_at FROM registry_artifact
-WHERE full_name ILIKE $1
-ORDER BY created_at DESC
-LIMIT $2 OFFSET $3
-`
-
-type ListRegistryArtifactsByNameParams struct {
-	FullName string `json:"full_name"`
-	Limit    int32  `json:"limit"`
-	Offset   int32  `json:"offset"`
-}
-
-func (q *Queries) ListRegistryArtifactsByName(ctx context.Context, arg ListRegistryArtifactsByNameParams) ([]RegistryArtifact, error) {
-	rows, err := q.db.Query(ctx, listRegistryArtifactsByName, arg.FullName, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []RegistryArtifact
-	for rows.Next() {
-		var i RegistryArtifact
-		if err := rows.Scan(
-			&i.ID,
-			&i.FullName,
-			&i.Description,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRegistryArtifactsByTag = `-- name: ListRegistryArtifactsByTag :many
-SELECT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
-JOIN registry_artifact_tag rat ON rat.artifact_id = ra.id
-WHERE rat.tag = $1
-ORDER BY ra.created_at DESC
-LIMIT $2 OFFSET $3
-`
-
-type ListRegistryArtifactsByTagParams struct {
-	Tag    string `json:"tag"`
-	Limit  int32  `json:"limit"`
-	Offset int32  `json:"offset"`
-}
-
-func (q *Queries) ListRegistryArtifactsByTag(ctx context.Context, arg ListRegistryArtifactsByTagParams) ([]RegistryArtifact, error) {
-	rows, err := q.db.Query(ctx, listRegistryArtifactsByTag, arg.Tag, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []RegistryArtifact
-	for rows.Next() {
-		var i RegistryArtifact
-		if err := rows.Scan(
-			&i.ID,
-			&i.FullName,
-			&i.Description,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRegistryArtifactsByTypes = `-- name: ListRegistryArtifactsByTypes :many
-SELECT DISTINCT ra.id, ra.full_name, ra.description, ra.created_at, ra.updated_at FROM registry_artifact ra
-JOIN registry_artifact_type_map ratm ON ratm.artifact_id = ra.id
-JOIN registry_artifact_type rat ON rat.id = ratm.type_id
-WHERE rat.name = ANY($1::text[])
-ORDER BY ra.created_at DESC
-LIMIT $2 OFFSET $3
-`
-
-type ListRegistryArtifactsByTypesParams struct {
-	Column1 []string `json:"column_1"`
-	Limit   int32    `json:"limit"`
-	Offset  int32    `json:"offset"`
-}
-
-func (q *Queries) ListRegistryArtifactsByTypes(ctx context.Context, arg ListRegistryArtifactsByTypesParams) ([]RegistryArtifact, error) {
-	rows, err := q.db.Query(ctx, listRegistryArtifactsByTypes, arg.Column1, arg.Limit, arg.Offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []RegistryArtifact
-	for rows.Next() {
-		var i RegistryArtifact
-		if err := rows.Scan(
-			&i.ID,
-			&i.FullName,
-			&i.Description,
-			&i.CreatedAt,
-			&i.UpdatedAt,
+			&i.VersionCount,
+			&i.LargestVersionBytes,
+			&i.TotalBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -451,7 +442,7 @@ UPDATE registry_artifact
 SET description = $2,
     updated_at  = NOW()
 WHERE id = $1
-RETURNING id, full_name, description, created_at, updated_at
+RETURNING id, full_name, description, created_at, updated_at, version_count, largest_version_bytes, total_bytes
 `
 
 type UpdateRegistryArtifactParams struct {
@@ -468,6 +459,9 @@ func (q *Queries) UpdateRegistryArtifact(ctx context.Context, arg UpdateRegistry
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VersionCount,
+		&i.LargestVersionBytes,
+		&i.TotalBytes,
 	)
 	return i, err
 }

@@ -35,8 +35,12 @@
 - Shared artifact type taxonomy (`/api/v1/types`), assignable many-to-many per artifact
 - Per-version raw configuration string (JSON or YAML, stored as-is)
 - Pluggable storage: local filesystem for dev, S3 / S3-compatible (MinIO, Ceph) for production
-- Filter artifacts by name prefix, by tag, or by type
-- Admin maintenance API (`/api/v1/admin/**`) for bulk cleanup of empty/abandoned artifacts and versions
+- Filter artifacts by name prefix, tag, type, age, version count, file state (combinable); sort by creation, name, version count or largest version size
+- Registry-wide tag list with broken-tag detection (tag on a version without downloadable files); unused-type cleanup
+- Retention policies per artifact or type (`keepLast`, `maxAgeDays`) with an effective rule per artifact, ready to feed into the bulk version delete
+- Version lists take the same filters as the bulk deletes (`keepLast`, `olderThan`, semver range, `hasFiles`, …), so every user can see what a cleanup would hit
+- Admin maintenance API (`/api/v1/admin/**`) for bulk cleanup of empty/abandoned artifacts and versions and of files left `PENDING`/`ERROR` by failed uploads
+- Bulk version deletes with files, per artifact or registry-wide: `keepLast`, `olderThan`, semver range, explicit list, `dryRun` preview; tagged versions are never touched
 - Daily DB-metadata backups to S3 and manual disaster-recovery restore (`fusion-index backup-db` / `restore-db`)
 - S3 key-prefix migration on upgrade (`fusion-index migrate-s3-prefix`), so multiple instances can share one bucket
 - Automatic DB migrations at startup via [golang-migrate](https://github.com/golang-migrate/migrate)

@@ -52,14 +52,24 @@ func (h *FileHandler) List(c *gin.Context) {
 	if !ok {
 		return
 	}
+	statuses := make(map[string]bool)
+	for _, s := range c.QueryArray("status") {
+		if s != "PENDING" && s != "AVAILABLE" && s != "ERROR" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status must be PENDING, AVAILABLE or ERROR"})
+			return
+		}
+		statuses[s] = true
+	}
 	files, err := h.queries.ListArtifactFiles(c, version.ID)
 	if err != nil {
 		internalError(c, err)
 		return
 	}
-	resp := make([]dto.FileResponse, len(files))
-	for i, f := range files {
-		resp[i] = dto.ToFileResponse(f, artifactID, sv)
+	resp := make([]dto.FileResponse, 0, len(files))
+	for _, f := range files {
+		if len(statuses) == 0 || statuses[f.Status] {
+			resp = append(resp, dto.ToFileResponse(f, artifactID, sv))
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -105,7 +115,7 @@ func (h *FileHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	storagePath := fmt.Sprintf("%d/%d/%d/%d/%d/%s", artifactID, sv.Major, sv.Minor, sv.Patch, record.ID, header.Filename)
+	storagePath := fileStoragePath(artifactID, sv, record.ID, header.Filename)
 
 	resolvedPath, err := h.storage.Store(storagePath, file, header.Size, contentType)
 	if err != nil {
@@ -199,7 +209,7 @@ func (h *FileHandler) Download(c *gin.Context) {
 }
 
 func (h *FileHandler) Delete(c *gin.Context) {
-	_, _, version, ok := h.resolveVersion(c)
+	artifactID, sv, version, ok := h.resolveVersion(c)
 	if !ok {
 		return
 	}
@@ -216,8 +226,9 @@ func (h *FileHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return
 	}
-	if err := h.storage.Delete(f.StoragePath); err != nil { // best-effort
-		middleware.LoggerFromCtx(c).Warn("delete file from storage", "path", f.StoragePath, "error", err)
+	path := fileObjectPath(f, artifactID, sv)
+	if err := h.storage.Delete(path); err != nil { // best-effort
+		middleware.LoggerFromCtx(c).Warn("delete file from storage", "path", path, "error", err)
 	}
 	if err := h.queries.DeleteArtifactFile(c, fileID); err != nil {
 		internalError(c, err)

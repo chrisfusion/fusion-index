@@ -23,7 +23,14 @@ import (
 	"fusion-platform/fusion-index/internal/storage"
 )
 
-var testServer *httptest.Server
+var (
+	testServer      *httptest.Server
+	testQueries     *db.Queries
+	testArtifactDir string
+)
+
+// testProtectedTag exempts artifacts from admin bulk deletes in the test server.
+const testProtectedTag = "protect"
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
@@ -81,8 +88,10 @@ func TestMain(m *testing.M) {
 
 	queries := db.New(pool)
 	store := storage.NewFilesystemStorage(artifactDir)
+	testQueries = queries
+	testArtifactDir = artifactDir
 
-	router := api.NewRouter(pool, queries, store, "FILESYSTEM", &config.Config{})
+	router := api.NewRouter(pool, queries, store, "FILESYSTEM", &config.Config{AdminProtectedTag: testProtectedTag})
 	testServer = httptest.NewServer(router)
 	defer testServer.Close()
 

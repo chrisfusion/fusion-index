@@ -14,6 +14,12 @@ type TypeCount struct {
 	Count    int64  `json:"count"`
 }
 
+// BackendBytes holds the stored bytes (AVAILABLE files) of one storage backend.
+type BackendBytes struct {
+	Backend string `json:"backend"`
+	Bytes   int64  `json:"bytes"`
+}
+
 // Snapshot is a point-in-time view of registry aggregate metrics.
 type Snapshot struct {
 	CachedAt                 time.Time   `json:"cachedAt"`
@@ -27,6 +33,14 @@ type Snapshot struct {
 	ArtifactsWithoutTags     int64       `json:"artifactsWithoutTags"`
 	ArtifactsWithoutVersions int64       `json:"artifactsWithoutVersions"`
 	TypeCounts               []TypeCount `json:"typeCounts"`
+
+	// Maintenance indicators — each matches a read filter / admin cleanup.
+	ArtifactsWithoutFiles int64          `json:"artifactsWithoutFiles"`
+	VersionsWithoutFiles  int64          `json:"versionsWithoutFiles"`
+	BrokenTags            int64          `json:"brokenTags"`
+	UnusedTypes           int64          `json:"unusedTypes"`
+	RetentionPolicies     int64          `json:"retentionPolicies"`
+	StorageBytesByBackend []BackendBytes `json:"storageBytesByBackend"`
 }
 
 // Cache is a TTL-based in-memory cache for a single Snapshot.

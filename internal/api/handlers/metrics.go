@@ -76,6 +76,30 @@ func (h *MetricsHandler) load(ctx context.Context) (*metrics.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	withoutFiles, err := q.CountArtifactsWithVersionsButNoFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	versionsWithoutFiles, err := q.CountVersionsWithoutAnyFiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	brokenTags, err := q.CountBrokenTags(ctx)
+	if err != nil {
+		return nil, err
+	}
+	unusedTypes, err := q.CountUnusedTypes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	retentionPolicies, err := q.CountRetentionPolicies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	backendRows, err := q.SumStorageBytesByBackend(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	var filesAvailable, filesPending, filesError int64
 	for _, r := range fileRows {
@@ -94,6 +118,11 @@ func (h *MetricsHandler) load(ctx context.Context) (*metrics.Snapshot, error) {
 		typeCounts[i] = metrics.TypeCount{TypeName: r.TypeName, Count: r.ArtifactCount}
 	}
 
+	byBackend := make([]metrics.BackendBytes, len(backendRows))
+	for i, r := range backendRows {
+		byBackend[i] = metrics.BackendBytes{Backend: r.StorageBackend, Bytes: r.TotalBytes}
+	}
+
 	return &metrics.Snapshot{
 		CachedAt:                 time.Now(),
 		TotalArtifacts:           totalArtifacts,
@@ -106,5 +135,11 @@ func (h *MetricsHandler) load(ctx context.Context) (*metrics.Snapshot, error) {
 		ArtifactsWithoutTags:     withoutTags,
 		ArtifactsWithoutVersions: withoutVersions,
 		TypeCounts:               typeCounts,
+		ArtifactsWithoutFiles:    withoutFiles,
+		VersionsWithoutFiles:     versionsWithoutFiles,
+		BrokenTags:               brokenTags,
+		UnusedTypes:              unusedTypes,
+		RetentionPolicies:        retentionPolicies,
+		StorageBytesByBackend:    byBackend,
 	}, nil
 }

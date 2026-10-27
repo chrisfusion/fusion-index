@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const deleteArtifactTag = `-- name: DeleteArtifactTag :exec
@@ -136,6 +138,85 @@ func (q *Queries) ListTagsByVersionIDs(ctx context.Context, dollar_1 []int64) ([
 			&i.VersionID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTagsFiltered = `-- name: ListTagsFiltered :many
+WITH t AS (
+  SELECT rat.id, rat.artifact_id, ra.full_name, rat.tag, rat.version_id,
+         v.major, v.minor, v.patch, rat.updated_at,
+         NOT EXISTS (SELECT 1 FROM registry_artifact_file f
+                     WHERE f.version_id = v.id AND f.status = 'AVAILABLE') AS broken
+  FROM registry_artifact_tag rat
+  JOIN registry_artifact ra ON ra.id = rat.artifact_id
+  JOIN registry_artifact_version v ON v.id = rat.version_id
+  WHERE $4::text IS NULL OR rat.tag = $4::text
+)
+SELECT t.id, t.artifact_id, t.full_name, t.tag, t.version_id, t.major, t.minor, t.patch,
+       t.updated_at, t.broken::bool AS broken, COUNT(*) OVER () AS total_count
+FROM t
+WHERE $1::bool IS NULL OR t.broken = $1::bool
+ORDER BY t.full_name, t.tag
+LIMIT $3::int OFFSET $2::int
+`
+
+type ListTagsFilteredParams struct {
+	Broken    *bool   `json:"broken"`
+	RowOffset int32   `json:"row_offset"`
+	RowLimit  int32   `json:"row_limit"`
+	Tag       *string `json:"tag"`
+}
+
+type ListTagsFilteredRow struct {
+	ID         int64              `json:"id"`
+	ArtifactID int64              `json:"artifact_id"`
+	FullName   string             `json:"full_name"`
+	Tag        string             `json:"tag"`
+	VersionID  int64              `json:"version_id"`
+	Major      int32              `json:"major"`
+	Minor      int32              `json:"minor"`
+	Patch      int32              `json:"patch"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+	Broken     bool               `json:"broken"`
+	TotalCount int64              `json:"total_count"`
+}
+
+// Registry-wide tag list (GET /api/v1/tags). broken = the tagged version has no
+// AVAILABLE file, i.e. resolving the tag gives nothing downloadable.
+func (q *Queries) ListTagsFiltered(ctx context.Context, arg ListTagsFilteredParams) ([]ListTagsFilteredRow, error) {
+	rows, err := q.db.Query(ctx, listTagsFiltered,
+		arg.Broken,
+		arg.RowOffset,
+		arg.RowLimit,
+		arg.Tag,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTagsFilteredRow
+	for rows.Next() {
+		var i ListTagsFilteredRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ArtifactID,
+			&i.FullName,
+			&i.Tag,
+			&i.VersionID,
+			&i.Major,
+			&i.Minor,
+			&i.Patch,
+			&i.UpdatedAt,
+			&i.Broken,
+			&i.TotalCount,
 		); err != nil {
 			return nil, err
 		}

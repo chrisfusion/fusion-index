@@ -7,7 +7,22 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countUnusedArtifactTypes = `-- name: CountUnusedArtifactTypes :one
+SELECT COUNT(*) FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id)
+`
+
+func (q *Queries) CountUnusedArtifactTypes(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnusedArtifactTypes, createdAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const createArtifactType = `-- name: CreateArtifactType :one
 INSERT INTO registry_artifact_type (name, description)
@@ -40,6 +55,21 @@ DELETE FROM registry_artifact_type WHERE id = $1
 func (q *Queries) DeleteArtifactType(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, deleteArtifactType, id)
 	return err
+}
+
+const deleteUnusedArtifactTypes = `-- name: DeleteUnusedArtifactTypes :execrows
+DELETE FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id)
+`
+
+// Retention policies on these types go with them (ON DELETE CASCADE).
+func (q *Queries) DeleteUnusedArtifactTypes(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUnusedArtifactTypes, createdAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getArtifactType = `-- name: GetArtifactType :one
@@ -77,12 +107,55 @@ func (q *Queries) GetArtifactTypeByName(ctx context.Context, name string) (Regis
 }
 
 const listArtifactTypes = `-- name: ListArtifactTypes :many
-SELECT id, name, description, created_at, updated_at FROM registry_artifact_type
-ORDER BY name ASC
+SELECT t.id, t.name, t.description, t.created_at, t.updated_at FROM registry_artifact_type t
+WHERE $1::bool IS NULL
+   OR NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id) = $1::bool
+ORDER BY t.name ASC
 `
 
-func (q *Queries) ListArtifactTypes(ctx context.Context) ([]RegistryArtifactType, error) {
-	rows, err := q.db.Query(ctx, listArtifactTypes)
+// unused = NULL lists all types; true only types assigned to no artifact.
+func (q *Queries) ListArtifactTypes(ctx context.Context, unused *bool) ([]RegistryArtifactType, error) {
+	rows, err := q.db.Query(ctx, listArtifactTypes, unused)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifactType
+	for rows.Next() {
+		var i RegistryArtifactType
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnusedArtifactTypes = `-- name: ListUnusedArtifactTypes :many
+SELECT t.id, t.name, t.description, t.created_at, t.updated_at FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id)
+ORDER BY t.name ASC
+LIMIT $2 OFFSET $3
+`
+
+type ListUnusedArtifactTypesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Limit     int32              `json:"limit"`
+	Offset    int32              `json:"offset"`
+}
+
+func (q *Queries) ListUnusedArtifactTypes(ctx context.Context, arg ListUnusedArtifactTypesParams) ([]RegistryArtifactType, error) {
+	rows, err := q.db.Query(ctx, listUnusedArtifactTypes, arg.CreatedAt, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

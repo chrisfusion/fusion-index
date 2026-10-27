@@ -15,13 +15,17 @@ import (
 )
 
 type VersionHandler struct {
-	pool    *pgxpool.Pool
-	queries *db.Queries
-	storage storage.Storage
+	pool     *pgxpool.Pool
+	queries  *db.Queries
+	storage  storage.Storage
+	filtered filteredVersions
 }
 
-func NewVersionHandler(pool *pgxpool.Pool, q *db.Queries, s storage.Storage) *VersionHandler {
-	return &VersionHandler{pool: pool, queries: q, storage: s}
+func NewVersionHandler(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, protectedTag string) *VersionHandler {
+	return &VersionHandler{
+		pool: pool, queries: q, storage: s,
+		filtered: filteredVersions{pool: pool, queries: q, storage: s, protectedTag: protectedTag},
+	}
 }
 
 func (h *VersionHandler) List(c *gin.Context) {
@@ -34,9 +38,8 @@ func (h *VersionHandler) List(c *gin.Context) {
 		return
 	}
 
-	versions, err := h.queries.ListArtifactVersions(c, artifactID)
-	if err != nil {
-		internalError(c, err)
+	rows, ok := h.filtered.query(c, &artifactID, nil, 0)
+	if !ok {
 		return
 	}
 
@@ -51,11 +54,49 @@ func (h *VersionHandler) List(c *gin.Context) {
 		tagsByVersion[t.VersionID] = append(tagsByVersion[t.VersionID], t)
 	}
 
-	resp := make([]dto.VersionResponse, len(versions))
-	for i, v := range versions {
-		resp[i] = dto.ToVersionResponse(v, tagsByVersion[v.ID])
+	resp := make([]dto.VersionResponse, len(rows))
+	for i, r := range rows {
+		resp[i] = dto.ToVersionResponse(versionFromFilteredRow(r), tagsByVersion[r.ID])
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// ListAll lists versions across all artifacts (paginated) with the same filters as the
+// per-artifact list — the read-only counterpart of DELETE /admin/versions.
+func (h *VersionHandler) ListAll(c *gin.Context) {
+	page, pageSize := parsePagination(c)
+	limit := int32(pageSize)
+	rows, ok := h.filtered.query(c, nil, &limit, int32(page*pageSize))
+	if !ok {
+		return
+	}
+	var total int64
+	if len(rows) > 0 {
+		total = rows[0].TotalCount
+	} else if page > 0 {
+		// Past the last page the window count has no row to ride on; ask page 0.
+		one := int32(1)
+		first, ok := h.filtered.query(c, nil, &one, 0)
+		if !ok {
+			return
+		}
+		if len(first) > 0 {
+			total = first[0].TotalCount
+		}
+	}
+
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	tagsByVersion := tagsByVersionIDs(c, h.queries, ids)
+	items := make([]dto.VersionResponse, len(rows))
+	for i, r := range rows {
+		items[i] = dto.ToVersionResponse(versionFromFilteredRow(r), tagsByVersion[r.ID])
+	}
+	c.JSON(http.StatusOK, dto.PageResponse[dto.VersionResponse]{
+		Items: items, Total: total, Page: page, PageSize: pageSize,
+	})
 }
 
 func (h *VersionHandler) Create(c *gin.Context) {
@@ -182,8 +223,9 @@ func (h *VersionHandler) Delete(c *gin.Context) {
 	files, err := h.queries.ListArtifactFiles(c, version.ID)
 	if err == nil {
 		for _, f := range files {
-			if err := h.storage.Delete(f.StoragePath); err != nil {
-				middleware.LoggerFromCtx(c).Warn("delete file from storage on version delete", "path", f.StoragePath, "error", err)
+			path := fileObjectPath(f, artifactID, sv)
+			if err := h.storage.Delete(path); err != nil {
+				middleware.LoggerFromCtx(c).Warn("delete file from storage on version delete", "path", path, "error", err)
 			}
 		}
 	}
@@ -193,4 +235,17 @@ func (h *VersionHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// BulkDelete deletes the versions of one artifact matching the query filters.
+func (h *VersionHandler) BulkDelete(c *gin.Context) {
+	artifactID, ok := pathID(c)
+	if !ok {
+		return
+	}
+	if _, err := h.queries.GetRegistryArtifact(c, artifactID); err != nil {
+		notFoundOrInternal(c, err, "artifact not found")
+		return
+	}
+	h.filtered.bulkDelete(c, &artifactID)
 }

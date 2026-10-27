@@ -10,8 +10,29 @@ SELECT * FROM registry_artifact_type WHERE id = $1;
 SELECT * FROM registry_artifact_type WHERE name = $1;
 
 -- name: ListArtifactTypes :many
-SELECT * FROM registry_artifact_type
-ORDER BY name ASC;
+-- unused = NULL lists all types; true only types assigned to no artifact.
+SELECT t.* FROM registry_artifact_type t
+WHERE sqlc.narg(unused)::bool IS NULL
+   OR NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id) = sqlc.narg(unused)::bool
+ORDER BY t.name ASC;
+
+-- name: ListUnusedArtifactTypes :many
+SELECT t.* FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id)
+ORDER BY t.name ASC
+LIMIT $2 OFFSET $3;
+
+-- name: CountUnusedArtifactTypes :one
+SELECT COUNT(*) FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id);
+
+-- name: DeleteUnusedArtifactTypes :execrows
+-- Retention policies on these types go with them (ON DELETE CASCADE).
+DELETE FROM registry_artifact_type t
+WHERE t.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_type_map m WHERE m.type_id = t.id);
 
 -- name: UpdateArtifactType :one
 UPDATE registry_artifact_type

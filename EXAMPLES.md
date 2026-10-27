@@ -84,6 +84,26 @@ curl -s "http://127.0.0.1:18080/api/v1/artifacts?name=org.fusion" | python3 -m j
 # Filter by tag
 curl -s "http://127.0.0.1:18080/api/v1/artifacts?tag=latest" | python3 -m json.tool
 
+# Filters combine with AND
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?name=org.fusion&tag=latest&type=model" | python3 -m json.tool
+
+# Sort: most versions first / fewest first / largest version (bytes) first
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?sort=versionCount" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?sort=versionCount&order=asc" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?sort=largestVersion" | python3 -m json.tool
+# Each item carries "versionCount" and "largestVersionBytes"
+
+# Size: all versions together / at least 1 GiB / artifacts without a "latest" tag / with a retention rule
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?sort=totalSize" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?minTotalBytes=1073741824" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?missingTag=latest" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?hasRetention=true" | python3 -m json.tool
+
+# Maintenance views (same sets the admin cleanups delete, readable by everyone)
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?maxVersions=0" | python3 -m json.tool                  # no versions
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?minVersions=1&hasFiles=false" | python3 -m json.tool  # versions, no files
+curl -s "http://127.0.0.1:18080/api/v1/artifacts?hasIncompleteFiles=true" | python3 -m json.tool      # failed/pending uploads
+
 # Pagination
 curl -s "http://127.0.0.1:18080/api/v1/artifacts?page=0&pageSize=5" | python3 -m json.tool
 curl -s "http://127.0.0.1:18080/api/v1/artifacts?page=1&pageSize=5" | python3 -m json.tool
@@ -117,7 +137,7 @@ curl -s -X PUT http://127.0.0.1:18080/api/v1/artifacts/1 \
 
 ```bash
 curl -s -X DELETE http://127.0.0.1:18080/api/v1/artifacts/1
-# 204 No Content on success
+# 204 No Content on success — versions, files, tags go with it, files also from storage
 
 # Confirm deletion
 curl -s http://127.0.0.1:18080/api/v1/artifacts/1 | python3 -m json.tool
@@ -199,7 +219,21 @@ curl -s -X POST "http://127.0.0.1:18080/api/v1/artifacts/999999/versions" \
 
 ```bash
 curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions" | python3 -m json.tool
-# Returns sorted by semver descending (major, minor, patch)
+# Returns sorted by semver descending (major, minor, patch); each version carries "totalBytes"
+
+# Same filters as the bulk delete — show before you delete
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?keepLast=5" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?keepLast=5&deletable=true" | python3 -m json.tool  # exactly what DELETE would remove
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?hasFiles=false" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?from=1.0.0&below=2.0.0" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?minBytes=104857600" | python3 -m json.tool  # >= 100 MiB
+
+# Across all artifacts (paginated)
+curl -s "http://127.0.0.1:18080/api/v1/versions?hasIncompleteFiles=true" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/versions?keepLast=10&deletable=true&pageSize=50" | python3 -m json.tool
+
+# Files of a version by status
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions/1.0.0/files?status=PENDING&status=ERROR" | python3 -m json.tool
 ```
 
 ### Get specific version
@@ -222,11 +256,43 @@ curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions/1.0.0" | 
 # → 404
 ```
 
+### Bulk delete versions
+
+Filters combine with AND, at least one is required. Tagged versions and protected artifacts (`ADMIN_PROTECTED_TAG`) are skipped. Files are removed from storage too.
+
+```bash
+# Preview: keep the newest 5 versions, delete the rest
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?keepLast=5&dryRun=true" \
+  | python3 -m json.tool
+# {"deleted": 12, "skipped": 1, "dryRun": true, "versions": [{"artifactId": 1, "version": "1.0.0"}, ...]}
+
+# Everything below 2.0.0 that is older than 90 days
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?below=2.0.0&olderThan=2026-07-29T00:00:00Z"
+
+# Range: 1.0.0 (inclusive) up to 1.5.0 (exclusive)
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?from=1.0.0&below=1.5.0"
+
+# Exact versions
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?version=1.0.0&version=1.0.1"
+
+# Versions without any file
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?hasFiles=false"
+
+# Registry-wide (admin): keep the newest 10 versions of every artifact
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/versions?keepLast=10&dryRun=true" | python3 -m json.tool
+```
+
 ---
 
 ## Tags
 
 Tags are unique per artifact. Assigning a tag that already exists **moves** it to the new version.
+
+```bash
+# Across all artifacts: every "latest", and tags whose version has nothing downloadable
+curl -s "http://127.0.0.1:18080/api/v1/tags?tag=latest" | python3 -m json.tool
+curl -s "http://127.0.0.1:18080/api/v1/tags?broken=true" | python3 -m json.tool
+```
 
 ### Assign tag
 
@@ -424,6 +490,35 @@ curl -s -X PUT http://127.0.0.1:18080/api/v1/types/1 \
 
 curl -s -X DELETE http://127.0.0.1:18080/api/v1/types/1
 # 204 No Content
+
+# Types no artifact uses
+curl -s "http://127.0.0.1:18080/api/v1/types?unused=true" | python3 -m json.tool
+```
+
+### Retention policies
+
+Stored and reported only — an external runner applies them via the bulk version delete.
+
+```bash
+# Every artifact of type 1: keep the newest 10 versions, delete older ones only once they are 90 days old
+curl -s -X PUT http://127.0.0.1:18080/api/v1/types/1/retention \
+  -H "Content-Type: application/json" -d '{"keepLast":10,"maxAgeDays":90}' | python3 -m json.tool
+
+# Artifact-specific override
+curl -s -X PUT "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/retention" \
+  -H "Content-Type: application/json" -d '{"keepLast":3}' | python3 -m json.tool
+
+# Effective rule + ready-made filter
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/retention" | python3 -m json.tool
+# {"source":"artifact","rule":{"keepLast":3,"maxAgeDays":null},"own":{...},"fromTypes":[...],"versionFilter":"keepLast=3"}
+
+# What the rule would delete, then delete it
+FILTER=$(curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/retention" | python3 -c 'import json,sys; print(json.load(sys.stdin)["versionFilter"])')
+curl -s "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?$FILTER&deletable=true" | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/versions?$FILTER" | python3 -m json.tool
+
+curl -s http://127.0.0.1:18080/api/v1/retention-policies | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/artifacts/$ARTIFACT_ID/retention"   # 204
 ```
 
 ### Assign / unassign a type on an artifact
@@ -463,6 +558,17 @@ curl -s "http://127.0.0.1:18080/api/v1/admin/versions/empty?olderThan=2026-01-01
   | python3 -m json.tool
 curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/versions/empty?olderThan=2026-01-01T00:00:00Z" \
   | python3 -m json.tool
+
+# Files stuck in PENDING/ERROR (interrupted or failed uploads) — run this first,
+# they otherwise keep their version from counting as file-less
+curl -s "http://127.0.0.1:18080/api/v1/admin/files/incomplete?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/files/incomplete?olderThan=2026-01-01T00:00:00Z" \
+  | python3 -m json.tool
+
+# Types assigned to no artifact
+curl -s "http://127.0.0.1:18080/api/v1/admin/types/unused?olderThan=2026-01-01T00:00:00Z" | python3 -m json.tool
+curl -s -X DELETE "http://127.0.0.1:18080/api/v1/admin/types/unused?olderThan=2026-01-01T00:00:00Z" | python3 -m json.tool
 
 # Artifacts whose versions all have no files (cascades)
 curl -s "http://127.0.0.1:18080/api/v1/admin/artifacts/no-files?olderThan=2026-01-01T00:00:00Z" \

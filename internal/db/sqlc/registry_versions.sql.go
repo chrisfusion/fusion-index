@@ -27,7 +27,7 @@ func (q *Queries) CountVersionsWithoutFiles(ctx context.Context, createdAt pgtyp
 const createArtifactVersion = `-- name: CreateArtifactVersion :one
 INSERT INTO registry_artifact_version (artifact_id, major, minor, patch, config)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, artifact_id, major, minor, patch, config, created_at
+RETURNING id, artifact_id, major, minor, patch, config, created_at, total_bytes
 `
 
 type CreateArtifactVersionParams struct {
@@ -55,6 +55,7 @@ func (q *Queries) CreateArtifactVersion(ctx context.Context, arg CreateArtifactV
 		&i.Patch,
 		&i.Config,
 		&i.CreatedAt,
+		&i.TotalBytes,
 	)
 	return i, err
 }
@@ -66,6 +67,41 @@ DELETE FROM registry_artifact_version WHERE id = $1
 func (q *Queries) DeleteArtifactVersion(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, deleteArtifactVersion, id)
 	return err
+}
+
+const deleteUnprotectedVersionsByIDs = `-- name: DeleteUnprotectedVersionsByIDs :many
+DELETE FROM registry_artifact_version v
+WHERE v.id = ANY($1::bigint[])
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_tag t WHERE t.version_id = v.id)
+  AND NOT EXISTS (SELECT 1 FROM registry_artifact_tag t WHERE t.artifact_id = v.artifact_id AND t.tag = $2::text)
+RETURNING v.id
+`
+
+type DeleteUnprotectedVersionsByIDsParams struct {
+	Ids          []int64 `json:"ids"`
+	ProtectedTag string  `json:"protected_tag"`
+}
+
+// Re-checks protection inside the delete so a tag assigned after the candidate
+// list was built still saves its version.
+func (q *Queries) DeleteUnprotectedVersionsByIDs(ctx context.Context, arg DeleteUnprotectedVersionsByIDsParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, deleteUnprotectedVersionsByIDs, arg.Ids, arg.ProtectedTag)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteVersionsWithoutFiles = `-- name: DeleteVersionsWithoutFiles :execrows
@@ -92,7 +128,7 @@ func (q *Queries) DeleteVersionsWithoutFiles(ctx context.Context, arg DeleteVers
 }
 
 const getArtifactVersion = `-- name: GetArtifactVersion :one
-SELECT id, artifact_id, major, minor, patch, config, created_at FROM registry_artifact_version
+SELECT id, artifact_id, major, minor, patch, config, created_at, total_bytes FROM registry_artifact_version
 WHERE artifact_id = $1
   AND major = $2
   AND minor = $3
@@ -122,12 +158,13 @@ func (q *Queries) GetArtifactVersion(ctx context.Context, arg GetArtifactVersion
 		&i.Patch,
 		&i.Config,
 		&i.CreatedAt,
+		&i.TotalBytes,
 	)
 	return i, err
 }
 
 const getArtifactVersionByID = `-- name: GetArtifactVersionByID :one
-SELECT id, artifact_id, major, minor, patch, config, created_at FROM registry_artifact_version WHERE id = $1
+SELECT id, artifact_id, major, minor, patch, config, created_at, total_bytes FROM registry_artifact_version WHERE id = $1
 `
 
 func (q *Queries) GetArtifactVersionByID(ctx context.Context, id int64) (RegistryArtifactVersion, error) {
@@ -141,25 +178,116 @@ func (q *Queries) GetArtifactVersionByID(ctx context.Context, id int64) (Registr
 		&i.Patch,
 		&i.Config,
 		&i.CreatedAt,
+		&i.TotalBytes,
 	)
 	return i, err
 }
 
-const listArtifactVersions = `-- name: ListArtifactVersions :many
-SELECT id, artifact_id, major, minor, patch, config, created_at FROM registry_artifact_version
-WHERE artifact_id = $1
-ORDER BY major DESC, minor DESC, patch DESC
+const listVersionsFiltered = `-- name: ListVersionsFiltered :many
+WITH ranked AS (
+  SELECT v.id, v.artifact_id, v.major, v.minor, v.patch, v.config, v.created_at, v.total_bytes,
+         row_number() OVER (PARTITION BY v.artifact_id ORDER BY v.major DESC, v.minor DESC, v.patch DESC) AS rn
+  FROM registry_artifact_version v
+  WHERE $4::bigint IS NULL OR v.artifact_id = $4::bigint
+), matched AS (
+  SELECT r.id, r.artifact_id, r.major, r.minor, r.patch, r.config, r.created_at, r.total_bytes, r.rn,
+         (EXISTS (SELECT 1 FROM registry_artifact_tag t WHERE t.version_id = r.id)
+          OR EXISTS (SELECT 1 FROM registry_artifact_tag t WHERE t.artifact_id = r.artifact_id AND t.tag = $5::text)
+         ) AS protected
+  FROM ranked r
+  WHERE ($6::int IS NULL OR r.rn > $6::int)
+    AND ($7::timestamptz IS NULL OR r.created_at < $7::timestamptz)
+    AND ($8::int IS NULL
+         OR (r.major, r.minor, r.patch) >= ($8::int, $9::int, $10::int))
+    AND ($11::int IS NULL
+         OR (r.major, r.minor, r.patch) < ($11::int, $12::int, $13::int))
+    AND ($14::text[] IS NULL
+         OR (r.major::text || '.' || r.minor::text || '.' || r.patch::text) = ANY($14::text[]))
+    AND ($15::bool IS NULL
+         OR EXISTS (SELECT 1 FROM registry_artifact_file f WHERE f.version_id = r.id) = $15::bool)
+    AND ($16::bool IS NULL
+         OR EXISTS (SELECT 1 FROM registry_artifact_file f WHERE f.version_id = r.id AND f.status IN ('PENDING', 'ERROR')) = $16::bool)
+    AND ($17::bigint IS NULL OR r.total_bytes >= $17::bigint)
+    AND ($18::bigint IS NULL OR r.total_bytes <= $18::bigint)
+)
+SELECT m.id, m.artifact_id, m.major, m.minor, m.patch, m.config, m.created_at, m.total_bytes,
+       m.protected::bool AS protected,
+       COUNT(*) OVER () AS total_count
+FROM matched m
+WHERE NOT ($1::bool AND m.protected)
+ORDER BY m.artifact_id, m.major DESC, m.minor DESC, m.patch DESC
+LIMIT $3::int OFFSET $2::int
 `
 
-func (q *Queries) ListArtifactVersions(ctx context.Context, artifactID int64) ([]RegistryArtifactVersion, error) {
-	rows, err := q.db.Query(ctx, listArtifactVersions, artifactID)
+type ListVersionsFilteredParams struct {
+	DeletableOnly      bool               `json:"deletable_only"`
+	RowOffset          int32              `json:"row_offset"`
+	RowLimit           *int32             `json:"row_limit"`
+	ArtifactID         *int64             `json:"artifact_id"`
+	ProtectedTag       string             `json:"protected_tag"`
+	KeepLast           *int32             `json:"keep_last"`
+	OlderThan          pgtype.Timestamptz `json:"older_than"`
+	FromMajor          *int32             `json:"from_major"`
+	FromMinor          *int32             `json:"from_minor"`
+	FromPatch          *int32             `json:"from_patch"`
+	BelowMajor         *int32             `json:"below_major"`
+	BelowMinor         *int32             `json:"below_minor"`
+	BelowPatch         *int32             `json:"below_patch"`
+	Versions           []string           `json:"versions"`
+	HasFiles           *bool              `json:"has_files"`
+	HasIncompleteFiles *bool              `json:"has_incomplete_files"`
+	MinBytes           *int64             `json:"min_bytes"`
+	MaxBytes           *int64             `json:"max_bytes"`
+}
+
+type ListVersionsFilteredRow struct {
+	ID         int64              `json:"id"`
+	ArtifactID int64              `json:"artifact_id"`
+	Major      int32              `json:"major"`
+	Minor      int32              `json:"minor"`
+	Patch      int32              `json:"patch"`
+	Config     *string            `json:"config"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	TotalBytes int64              `json:"total_bytes"`
+	Protected  bool               `json:"protected"`
+	TotalCount int64              `json:"total_count"`
+}
+
+// Shared by the version lists (GET /artifacts/{id}/versions, GET /versions) and the
+// bulk deletes (internal/api/handlers/version_bulk.go), so "show" and "delete" always
+// select the same versions. Every NULL filter is ignored, the rest combine with AND.
+// keep_last ranks all versions of an artifact by semver, tagged ones included.
+// protected = a tag points at the version or the artifact carries the protection
+// tag; bulk deletes never delete those, deletable_only hides them from lists.
+// row_limit NULL = no limit; total_count is the match count before LIMIT/OFFSET.
+func (q *Queries) ListVersionsFiltered(ctx context.Context, arg ListVersionsFilteredParams) ([]ListVersionsFilteredRow, error) {
+	rows, err := q.db.Query(ctx, listVersionsFiltered,
+		arg.DeletableOnly,
+		arg.RowOffset,
+		arg.RowLimit,
+		arg.ArtifactID,
+		arg.ProtectedTag,
+		arg.KeepLast,
+		arg.OlderThan,
+		arg.FromMajor,
+		arg.FromMinor,
+		arg.FromPatch,
+		arg.BelowMajor,
+		arg.BelowMinor,
+		arg.BelowPatch,
+		arg.Versions,
+		arg.HasFiles,
+		arg.HasIncompleteFiles,
+		arg.MinBytes,
+		arg.MaxBytes,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []RegistryArtifactVersion
+	var items []ListVersionsFilteredRow
 	for rows.Next() {
-		var i RegistryArtifactVersion
+		var i ListVersionsFilteredRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ArtifactID,
@@ -168,6 +296,9 @@ func (q *Queries) ListArtifactVersions(ctx context.Context, artifactID int64) ([
 			&i.Patch,
 			&i.Config,
 			&i.CreatedAt,
+			&i.TotalBytes,
+			&i.Protected,
+			&i.TotalCount,
 		); err != nil {
 			return nil, err
 		}
@@ -180,7 +311,7 @@ func (q *Queries) ListArtifactVersions(ctx context.Context, artifactID int64) ([
 }
 
 const listVersionsWithoutFiles = `-- name: ListVersionsWithoutFiles :many
-SELECT rav.id, rav.artifact_id, rav.major, rav.minor, rav.patch, rav.config, rav.created_at FROM registry_artifact_version rav
+SELECT rav.id, rav.artifact_id, rav.major, rav.minor, rav.patch, rav.config, rav.created_at, rav.total_bytes FROM registry_artifact_version rav
 WHERE rav.created_at < $1
   AND NOT EXISTS (SELECT 1 FROM registry_artifact_file raf WHERE raf.version_id = rav.id)
 ORDER BY rav.created_at DESC
@@ -210,6 +341,7 @@ func (q *Queries) ListVersionsWithoutFiles(ctx context.Context, arg ListVersions
 			&i.Patch,
 			&i.Config,
 			&i.CreatedAt,
+			&i.TotalBytes,
 		); err != nil {
 			return nil, err
 		}

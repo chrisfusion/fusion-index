@@ -153,6 +153,9 @@ registry_artifact
   id           BIGINT   PK (sequence, increment 50)
   full_name    VARCHAR(500)  UNIQUE NOT NULL          ← "org.team.name"
   description  TEXT
+  version_count          INT     ← trigger-maintained (migration 000009)
+  largest_version_bytes  BIGINT  ← max(total_bytes) of its versions, trigger-maintained
+  total_bytes            BIGINT  ← sum(total_bytes) of its versions, trigger-maintained
   created_at   TIMESTAMPTZ
   updated_at   TIMESTAMPTZ
        │
@@ -165,6 +168,7 @@ registry_artifact_version
   minor        INT      NOT NULL
   patch        INT      NOT NULL
   config       TEXT                                  ← raw JSON or YAML
+  total_bytes  BIGINT   ← sum(size_bytes) of its AVAILABLE files, trigger-maintained
   created_at   TIMESTAMPTZ
   UNIQUE (artifact_id, major, minor, patch)
        │
@@ -215,7 +219,8 @@ Key design decisions:
 - **`status` on files** — two-phase write (PENDING → AVAILABLE/ERROR) ensures the DB row exists before the storage call; partial failures are observable.
 - **Storage path includes file ID** — `{artifactID}/{major}/{minor}/{patch}/{fileID}/{filename}` guarantees storage-key uniqueness even if a file with the same name is re-uploaded after deletion.
 - **Tag upsert** — `ON CONFLICT (artifact_id, tag) DO UPDATE SET version_id = EXCLUDED.version_id` atomically moves a tag with no application-side conflict check.
-- **Cascade deletes** — deleting an artifact removes all versions, files, and tags automatically at the DB level; the version DELETE handler also performs best-effort storage cleanup before removing the version row.
+- **Cascade deletes** — deleting an artifact removes all versions, files, tags and its retention policy automatically at the DB level. The artifact DELETE and the bulk version deletes delete the rows first (one transaction) and then the storage objects, best-effort; the single version DELETE cleans storage before removing the row. Every storage delete uses `fileObjectPath()`, so failed uploads (placeholder `storage_path`) are removed from the real path.
+- **Size/count statistics are trigger-maintained** — `version_count`, `largest_version_bytes` and `total_bytes` back the artifact list sorts (`versionCount`, `largestVersion`). Aggregating live over all files cost ~380 ms per page at 1M files; as stored columns the sort is ~1–3 ms. Triggers on `registry_artifact_file` → `registry_artifact_version` → `registry_artifact` cover every write path (uploads, deletes, cascades, admin cleanups, `restore-db`); the version trigger locks the artifact row before recomputing, so concurrent writers can't leave stale values.
 - **Types are M:N via a join table** — `registry_artifact_type_map` lets one artifact carry multiple types and one type apply to many artifacts, unlike the artifact ↔ tag relationship which is per-artifact-unique.
 
 ---
@@ -228,18 +233,20 @@ Key design decisions:
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
-| `GET` | `/artifacts` | 200 | List (paginated); filter `?name=` prefix, `?tag=`, or `?type=` (repeatable) |
+| `GET` | `/artifacts` | 200, 400 | List (paginated); filters combine with AND — see "Filtering and sorting" below |
 | `POST` | `/artifacts` | 201, 400, 409 | Create |
 | `GET` | `/artifacts/{id}` | 200, 404 | Get by ID |
 | `PUT` | `/artifacts/{id}` | 200, 400, 404 | Update description |
-| `DELETE` | `/artifacts/{id}` | 204, 404 | Delete (cascades to versions, files, tags) |
+| `DELETE` | `/artifacts/{id}` | 204, 404 | Delete (cascades to versions, files, tags; removes the files from storage) |
 
 #### Versions
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
-| `GET` | `/artifacts/{id}/versions` | 200, 404 | List (newest first) |
+| `GET` | `/artifacts/{id}/versions` | 200, 400, 404 | List (newest first); same filters as the bulk delete, plus `deletable=true` |
+| `GET` | `/versions` | 200, 400 | List versions across all artifacts (paginated); same filters as `DELETE /admin/versions` |
 | `POST` | `/artifacts/{id}/versions` | 201, 400, 404, 409 | Create; body: `version`, `config`, `tags[]` |
+| `DELETE` | `/artifacts/{id}/versions` | 200, 400, 404 | Bulk delete by the version filters (see below); `dryRun=true` previews |
 | `GET` | `/artifacts/{id}/versions/{semver}` | 200, 400, 404 | Get |
 | `DELETE` | `/artifacts/{id}/versions/{semver}` | 204, 400, 404 | Delete (best-effort storage cleanup) |
 
@@ -247,6 +254,7 @@ Key design decisions:
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
+| `GET` | `/tags` | 200, 400 | Tags across all artifacts (paginated); `tag=` exact name, `broken=true` = version has no AVAILABLE file |
 | `PUT` | `/artifacts/{id}/tags/{tag}` | 200, 400, 404 | Assign tag (body: `{"version":"1.2.3"}`); moves if exists |
 | `DELETE` | `/artifacts/{id}/tags/{tag}` | 204, 404 | Delete tag |
 
@@ -266,7 +274,7 @@ Shared artifact taxonomy (e.g. `model`, `pipeline`, `library`), independent of t
 
 | Method | Path | Status codes | Description |
 |--------|------|-------------|-------------|
-| `GET` | `/types` | 200 | List all types |
+| `GET` | `/types` | 200, 400 | List types; `unused=true` = assigned to no artifact |
 | `POST` | `/types` | 201, 400, 409 | Create |
 | `GET` | `/types/{typeId}` | 200, 404 | Get |
 | `PUT` | `/types/{typeId}` | 200, 400, 404, 409 | Update name/description |
@@ -274,6 +282,18 @@ Shared artifact taxonomy (e.g. `model`, `pipeline`, `library`), independent of t
 | `GET` | `/artifacts/{id}/types` | 200, 404 | List types assigned to an artifact |
 | `PUT` | `/artifacts/{id}/types/{typeId}` | 200, 404 | Assign a type to an artifact |
 | `DELETE` | `/artifacts/{id}/types/{typeId}` | 204, 404 | Unassign |
+
+#### Retention
+
+Rules per artifact or per type (`registry_retention_policy`, migration 000010): `keepLast` and/or `maxAgeDays`. A rule matches versions outside the newest `keepLast` AND older than `maxAgeDays` — the bulk-delete AND semantics. fusion-index only stores and reports them; an external runner (planned maintenance pod) applies them by calling the bulk version delete with the effective `versionFilter`.
+
+| Method | Path | Status codes | Description |
+|--------|------|-------------|-------------|
+| `GET` | `/artifacts/{id}/retention` | 200, 404 | Effective rule: own policy, else most conservative merge of its types' policies (per field the max); plus `versionFilter` query string |
+| `PUT` | `/artifacts/{id}/retention` | 200, 400, 404 | Set own policy (body `{"keepLast":5,"maxAgeDays":90}`, at least one) |
+| `DELETE` | `/artifacts/{id}/retention` | 204, 404 | Remove own policy |
+| `GET`/`PUT`/`DELETE` | `/types/{typeId}/retention` | 200/204, 400, 404 | Same for a type |
+| `GET` | `/retention-policies` | 200 | All stored policies with artifact/type name |
 
 #### Admin
 
@@ -287,10 +307,61 @@ Maintenance endpoints for inspecting/cleaning up abandoned registry data (`inter
 | `DELETE` | `/admin/versions/empty` | 200, 400 | Bulk delete file-less versions |
 | `GET` | `/admin/artifacts/no-files` | 200, 400 | List artifacts whose versions have no files (paginated) |
 | `DELETE` | `/admin/artifacts/no-files` | 200, 400 | Bulk delete such artifacts and their versions (cascade) |
+| `GET` | `/admin/files/incomplete` | 200, 400 | List `PENDING`/`ERROR` files left by interrupted or failed uploads (paginated) |
+| `DELETE` | `/admin/files/incomplete` | 200, 400 | Bulk delete such files plus any leftover storage object (best-effort) |
+| `DELETE` | `/admin/versions` | 200, 400 | Bulk delete versions across all artifacts — same filters as the per-artifact route except `version` |
+| `GET` | `/admin/types/unused` | 200, 400 | List types assigned to no artifact (paginated) |
+| `DELETE` | `/admin/types/unused` | 200, 400 | Bulk delete them (their retention policies go along); no protection tag applies |
+
+**Bulk version delete** (`internal/api/handlers/version_bulk.go`, shared by `DELETE /artifacts/{id}/versions` and `DELETE /admin/versions`): uses the version filters (below); at least one is required, so a bare call never deletes everything. Versions any tag points at, and all versions of an artifact carrying `ADMIN_PROTECTED_TAG`, are never deleted and counted as `skipped`. Response: `{"deleted", "skipped", "dryRun", "versions": [{"artifactId", "version"}]}`.
+
+Run `files/incomplete` first: a version whose only file is a failed upload doesn't count as file-less until that row is gone, so `versions/empty` and `artifacts/no-files` can only pick it up afterwards.
+
+#### Filtering and sorting
+
+Filters are plain query parameters on the normal (non-admin) list routes, so every reader — UI users and maintenance tooling alike — can see what a cleanup would hit. The admin endpoints only add the destructive side.
+
+**Artifacts** (`GET /artifacts`), all combined with AND:
+
+| Parameter | Meaning |
+|---|---|
+| `name` | Full-name prefix |
+| `tag` | Has this tag |
+| `type` (repeatable) | Has at least one of these types |
+| `olderThan` | Created before (RFC3339) |
+| `minVersions` / `maxVersions` | Version count bounds (`maxVersions=0` = no versions) |
+| `hasFiles` | `false` = no file in any version |
+| `hasIncompleteFiles` | `true` = at least one PENDING/ERROR file |
+| `missingTag` | Does NOT have this tag (e.g. `latest`) |
+| `minTotalBytes` | All versions together at least this many bytes |
+| `hasRetention` | A retention rule applies (own or via a type) |
+| `sort` | `createdAt` (default), `name`, `versionCount`, `largestVersion` (bytes of the largest version), `totalSize` (bytes of all versions) |
+| `order` | `asc` / `desc`; default `asc` for `name`, `desc` otherwise |
+
+**Versions** (`GET /artifacts/{id}/versions`, `GET /versions`, and both bulk DELETEs — one shared query, `ListVersionsFiltered`):
+
+| Parameter | Meaning |
+|---|---|
+| `keepLast` | Skip the newest N versions of each artifact (by semver) |
+| `olderThan` | Created before (RFC3339) |
+| `from` / `below` | Semver range, `from` inclusive, `below` exclusive |
+| `version` (repeatable) | Exact versions — per artifact only |
+| `hasFiles` / `hasIncompleteFiles` | As for artifacts, per version |
+| `minBytes` / `maxBytes` | Version size bounds (sum of its AVAILABLE files) |
+| `deletable=true` (lists) | Hide versions a bulk delete would skip (tagged / protected) |
+| `dryRun=true` (deletes) | Report without deleting |
+
+**Files** (`GET .../files`): `status` (repeatable: `PENDING`, `AVAILABLE`, `ERROR`).
+
+**Tags** (`GET /tags`): `tag`, `broken`. **Types** (`GET /types`): `unused`.
+
+Admin cleanup → equivalent read filter: `artifacts/empty` = `maxVersions=0`; `artifacts/no-files` = `minVersions=1&hasFiles=false`; `versions/empty` = versions `hasFiles=false`; `files/incomplete` = `hasIncompleteFiles=true` on artifacts/versions, then `status=PENDING&status=ERROR` on files; `types/unused` = `GET /types?unused=true`.
+
+`/q/metrics` reports the size of each of these sets (`artifactsWithoutVersions`, `artifactsWithoutFiles`, `versionsWithoutFiles`, `filesPending`/`filesError`, `brokenTags`, `unusedTypes`) plus `retentionPolicies` and `storageBytesByBackend`.
 
 #### Pagination
 
-List artifacts accepts `?page=0&pageSize=20`. Default: `page=0`, `pageSize=20`. Response envelope:
+List artifacts and `GET /versions` accept `?page=0&pageSize=20`. Default: `page=0`, `pageSize=20`. Response envelope:
 
 ```json
 {
@@ -367,6 +438,7 @@ Transactions are opened only where atomicity is required:
 |-----------|-----|
 | `CreateArtifact` | Duplicate-name check + insert must be atomic |
 | `CreateVersion` | Version insert + N tag upserts must be atomic |
+| Bulk version delete | File listing + delete (which re-checks tags) must see the same versions; storage objects are removed only after commit |
 
 All other operations are single-query and run without explicit transactions. Read-only handlers (List, Get) use `h.queries` directly — no transaction needed.
 

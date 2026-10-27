@@ -20,7 +20,11 @@ func NewTypeHandler(pool *pgxpool.Pool, q *db.Queries) *TypeHandler {
 }
 
 func (h *TypeHandler) List(c *gin.Context) {
-	types, err := h.queries.ListArtifactTypes(c)
+	unused, ok := parseOptionalBool(c, "unused")
+	if !ok {
+		return
+	}
+	types, err := h.queries.ListArtifactTypes(c, unused)
 	if err != nil {
 		internalError(c, err)
 		return

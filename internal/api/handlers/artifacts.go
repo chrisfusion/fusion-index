@@ -9,73 +9,116 @@ import (
 	"fusion-platform/fusion-index/internal/api/dto"
 	"fusion-platform/fusion-index/internal/api/middleware"
 	db "fusion-platform/fusion-index/internal/db/sqlc"
+	"fusion-platform/fusion-index/internal/semver"
+	"fusion-platform/fusion-index/internal/storage"
 )
 
 type ArtifactHandler struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
+	storage storage.Storage
 }
 
-func NewArtifactHandler(pool *pgxpool.Pool, q *db.Queries) *ArtifactHandler {
-	return &ArtifactHandler{pool: pool, queries: q}
+func NewArtifactHandler(pool *pgxpool.Pool, q *db.Queries, s storage.Storage) *ArtifactHandler {
+	return &ArtifactHandler{pool: pool, queries: q, storage: s}
+}
+
+// artifactSorts maps the sort query values to their default direction (true = desc).
+var artifactSorts = map[string]bool{
+	"createdAt":      true,
+	"name":           false,
+	"versionCount":   true,
+	"largestVersion": true,
+	"totalSize":      true,
+}
+
+// parseArtifactListFilter reads the list filters (combined with AND) and the sort.
+// The maintenance views are plain filters here, so normal users get them too:
+// maxVersions=0 (no versions), minVersions=1&hasFiles=false (versions but no files),
+// hasIncompleteFiles=true (PENDING/ERROR uploads). missingTag=latest finds artifacts
+// without that tag, hasRetention whether a retention rule applies (own or via a type).
+func parseArtifactListFilter(c *gin.Context) (db.ListRegistryArtifactsFilteredParams, bool) {
+	var p db.ListRegistryArtifactsFilteredParams
+	var ok bool
+	if name := c.Query("name"); name != "" {
+		p.NamePrefix = &name
+	}
+	if tag := c.Query("tag"); tag != "" {
+		p.Tag = &tag
+	}
+	p.Types = c.QueryArray("type")
+	if p.OlderThan, ok = parseOptionalOlderThan(c); !ok {
+		return p, false
+	}
+	if p.MinVersions, ok = parseOptionalInt32(c, "minVersions", 0); !ok {
+		return p, false
+	}
+	if p.MaxVersions, ok = parseOptionalInt32(c, "maxVersions", 0); !ok {
+		return p, false
+	}
+	if p.HasFiles, ok = parseOptionalBool(c, "hasFiles"); !ok {
+		return p, false
+	}
+	if p.HasIncompleteFiles, ok = parseOptionalBool(c, "hasIncompleteFiles"); !ok {
+		return p, false
+	}
+	if tag := c.Query("missingTag"); tag != "" {
+		p.MissingTag = &tag
+	}
+	if p.MinTotalBytes, ok = parseOptionalInt64(c, "minTotalBytes"); !ok {
+		return p, false
+	}
+	if p.HasRetention, ok = parseOptionalBool(c, "hasRetention"); !ok {
+		return p, false
+	}
+
+	p.Sort = c.DefaultQuery("sort", "createdAt")
+	desc, known := artifactSorts[p.Sort]
+	if !known {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sort must be one of createdAt, name, versionCount, largestVersion, totalSize"})
+		return p, false
+	}
+	switch c.Query("order") {
+	case "":
+	case "asc":
+		desc = false
+	case "desc":
+		desc = true
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order must be asc or desc"})
+		return p, false
+	}
+	p.SortDesc = desc
+	return p, true
 }
 
 func (h *ArtifactHandler) List(c *gin.Context) {
 	page, pageSize := parsePagination(c)
-	name := c.Query("name")
-	tag := c.Query("tag")
-	types := c.QueryArray("type")
-
-	var artifacts []db.RegistryArtifact
-	var total int64
-	var err error
-
-	switch {
-	case len(types) > 0:
-		artifacts, err = h.queries.ListRegistryArtifactsByTypes(c, db.ListRegistryArtifactsByTypesParams{
-			Column1: types,
-			Limit:   int32(pageSize),
-			Offset:  int32(page * pageSize),
-		})
-		if err != nil {
-			internalError(c, err)
-			return
-		}
-		total, err = h.queries.CountRegistryArtifactsByTypes(c, types)
-	case name != "":
-		pattern := name + "%"
-		artifacts, err = h.queries.ListRegistryArtifactsByName(c, db.ListRegistryArtifactsByNameParams{
-			FullName: pattern,
-			Limit:    int32(pageSize),
-			Offset:   int32(page * pageSize),
-		})
-		if err != nil {
-			internalError(c, err)
-			return
-		}
-		total, err = h.queries.CountRegistryArtifactsByName(c, pattern)
-	case tag != "":
-		artifacts, err = h.queries.ListRegistryArtifactsByTag(c, db.ListRegistryArtifactsByTagParams{
-			Tag:    tag,
-			Limit:  int32(pageSize),
-			Offset: int32(page * pageSize),
-		})
-		if err != nil {
-			internalError(c, err)
-			return
-		}
-		total, err = h.queries.CountRegistryArtifactsByTag(c, tag)
-	default:
-		artifacts, err = h.queries.ListRegistryArtifacts(c, db.ListRegistryArtifactsParams{
-			Limit:  int32(pageSize),
-			Offset: int32(page * pageSize),
-		})
-		if err != nil {
-			internalError(c, err)
-			return
-		}
-		total, err = h.queries.CountRegistryArtifacts(c)
+	params, ok := parseArtifactListFilter(c)
+	if !ok {
+		return
 	}
+	params.RowLimit = int32(pageSize)
+	params.RowOffset = int32(page * pageSize)
+
+	artifacts, err := h.queries.ListRegistryArtifactsFiltered(c, params)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	total, err := h.queries.CountRegistryArtifactsFiltered(c, db.CountRegistryArtifactsFilteredParams{
+		NamePrefix:         params.NamePrefix,
+		Tag:                params.Tag,
+		Types:              params.Types,
+		OlderThan:          params.OlderThan,
+		MinVersions:        params.MinVersions,
+		MaxVersions:        params.MaxVersions,
+		HasFiles:           params.HasFiles,
+		HasIncompleteFiles: params.HasIncompleteFiles,
+		MissingTag:         params.MissingTag,
+		MinTotalBytes:      params.MinTotalBytes,
+		HasRetention:       params.HasRetention,
+	})
 	if err != nil {
 		internalError(c, err)
 		return
@@ -187,9 +230,34 @@ func (h *ArtifactHandler) Delete(c *gin.Context) {
 		notFoundOrInternal(c, err, "artifact not found")
 		return
 	}
-	if err := h.queries.DeleteRegistryArtifact(c, id); err != nil {
+
+	// DB first (the cascade drops versions, files and tags), storage after commit and
+	// best-effort — same order as the bulk version delete.
+	tx, err := h.pool.Begin(c)
+	if err != nil {
 		internalError(c, err)
 		return
+	}
+	defer tx.Rollback(c) //nolint:errcheck
+	qtx := h.queries.WithTx(tx)
+	files, err := qtx.ListFilesByArtifactID(c, id)
+	if err != nil {
+		internalError(c, err)
+		return
+	}
+	if err := qtx.DeleteRegistryArtifact(c, id); err != nil {
+		internalError(c, err)
+		return
+	}
+	if err := tx.Commit(c); err != nil {
+		internalError(c, err)
+		return
+	}
+	for _, r := range files {
+		path := fileObjectPath(r.RegistryArtifactFile, id, semver.Semver{Major: r.Major, Minor: r.Minor, Patch: r.Patch})
+		if err := h.storage.Delete(path); err != nil { // best-effort
+			middleware.LoggerFromCtx(c).Warn("delete file from storage on artifact delete", "artifact_id", id, "path", path, "error", err)
+		}
 	}
 	c.Status(http.StatusNoContent)
 }

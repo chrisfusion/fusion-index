@@ -36,3 +36,11 @@ type UpdateTypeRequest struct {
 	Name        string  `json:"name"        binding:"required,max=255"`
 	Description *string `json:"description" binding:"omitempty,max=2000"`
 }
+
+// ---- Retention ----
+
+// SetRetentionRequest needs at least one of the two fields (checked in the handler).
+type SetRetentionRequest struct {
+	KeepLast   *int32 `json:"keepLast"   binding:"omitempty,min=1"`
+	MaxAgeDays *int32 `json:"maxAgeDays" binding:"omitempty,min=1"`
+}

@@ -41,12 +41,13 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	mh := handlers.NewMetricsHandler(pool, q, metrics.NewCache(cfg.MetricsCacheTTL))
 	r.GET("/q/metrics", mh.Get)
 
-	ah := handlers.NewArtifactHandler(pool, q)
-	vh := handlers.NewVersionHandler(pool, q, s)
+	ah := handlers.NewArtifactHandler(pool, q, s)
+	vh := handlers.NewVersionHandler(pool, q, s, cfg.AdminProtectedTag)
 	fh := handlers.NewFileHandler(pool, q, s, storageBackend)
 	th := handlers.NewTagHandler(pool, q)
 	tyh := handlers.NewTypeHandler(pool, q)
-	adh := handlers.NewAdminHandler(q, cfg.AdminProtectedTag)
+	rh := handlers.NewRetentionHandler(q)
+	adh := handlers.NewAdminHandler(pool, q, s, cfg.AdminProtectedTag)
 
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.NewAuthMiddleware(cfg))
@@ -61,10 +62,12 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	// Versions
 	v1.GET("/artifacts/:id/versions", vh.List)
 	v1.POST("/artifacts/:id/versions", vh.Create)
+	v1.DELETE("/artifacts/:id/versions", vh.BulkDelete)
 	v1.GET("/artifacts/:id/versions/:semver", vh.Get)
 	v1.DELETE("/artifacts/:id/versions/:semver", vh.Delete)
 
 	// Tags
+	v1.GET("/tags", th.ListAll)
 	v1.PUT("/artifacts/:id/tags/:tag", th.Put)
 	v1.DELETE("/artifacts/:id/tags/:tag", th.Delete)
 
@@ -75,12 +78,24 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	v1.GET("/artifacts/:id/versions/:semver/files/:fileId/download", fh.Download)
 	v1.DELETE("/artifacts/:id/versions/:semver/files/:fileId", fh.Delete)
 
+	// Versions across all artifacts (read-only; bulk delete is DELETE /admin/versions)
+	v1.GET("/versions", vh.ListAll)
+
 	// Types
 	v1.GET("/types", tyh.List)
 	v1.POST("/types", tyh.Create)
 	v1.GET("/types/:typeId", tyh.Get)
 	v1.PUT("/types/:typeId", tyh.Update)
 	v1.DELETE("/types/:typeId", tyh.Delete)
+
+	// Retention policies (stored and reported only — applied by an external runner)
+	v1.GET("/retention-policies", rh.List)
+	v1.GET("/artifacts/:id/retention", rh.GetForArtifact)
+	v1.PUT("/artifacts/:id/retention", rh.PutForArtifact)
+	v1.DELETE("/artifacts/:id/retention", rh.DeleteForArtifact)
+	v1.GET("/types/:typeId/retention", rh.GetForType)
+	v1.PUT("/types/:typeId/retention", rh.PutForType)
+	v1.DELETE("/types/:typeId/retention", rh.DeleteForType)
 
 	// Artifact type assignments
 	v1.GET("/artifacts/:id/types", tyh.ListForArtifact)
@@ -91,10 +106,15 @@ func NewRouter(pool *pgxpool.Pool, q *db.Queries, s storage.Storage, storageBack
 	admin := v1.Group("/admin")
 	admin.GET("/artifacts/empty", adh.ListEmptyArtifacts)
 	admin.DELETE("/artifacts/empty", adh.DeleteEmptyArtifacts)
+	admin.DELETE("/versions", adh.BulkDeleteVersions)
 	admin.GET("/versions/empty", adh.ListVersionsWithoutFiles)
 	admin.DELETE("/versions/empty", adh.DeleteVersionsWithoutFiles)
 	admin.GET("/artifacts/no-files", adh.ListArtifactsWithoutFiles)
 	admin.DELETE("/artifacts/no-files", adh.DeleteArtifactsWithoutFiles)
+	admin.GET("/files/incomplete", adh.ListIncompleteFiles)
+	admin.DELETE("/files/incomplete", adh.DeleteIncompleteFiles)
+	admin.GET("/types/unused", adh.ListUnusedTypes)
+	admin.DELETE("/types/unused", adh.DeleteUnusedTypes)
 
 	return r
 }

@@ -19,6 +19,8 @@ servers:
 tags:
   - name: Health
     description: Kubernetes liveness and readiness probes
+  - name: Metrics
+    description: Registry aggregate metrics (always public, no auth)
   - name: Artifacts
     description: Artifact CRUD and search
   - name: Versions
@@ -29,11 +31,16 @@ tags:
     description: Per-version file upload, download, and metadata
   - name: Types
     description: Artifact type catalog and artifact type assignments
+  - name: Retention
+    description: >
+      Retention rules per artifact or type. Stored and reported only — applying them
+      is up to an external runner calling the bulk version delete with `versionFilter`.
   - name: Admin
     description: >
       Maintenance operations for administrators. All endpoints require `olderThan`
-      (RFC3339 timestamp) and support pagination. Bulk deletes skip artifacts or
-      versions protected by the configured protection tag (default `protect`).
+      (RFC3339 timestamp) and support pagination. Bulk deletes skip artifacts,
+      versions or files protected by the configured protection tag (default `protect`).
+      Unused types have no protection.
 
 # ---------------------------------------------------------------------------
 # Reusable components
@@ -117,6 +124,103 @@ components:
         format: date-time
         example: "2024-01-01T00:00:00Z"
 
+    olderThanFilter:
+      name: olderThan
+      in: query
+      required: false
+      description: Only items created before this timestamp (RFC3339).
+      schema:
+        type: string
+        format: date-time
+        example: "2024-01-01T00:00:00Z"
+
+    keepLast:
+      name: keepLast
+      in: query
+      description: Skip the newest N versions of each artifact (by semver), match the rest.
+      schema:
+        type: integer
+        minimum: 1
+
+    versionFrom:
+      name: from
+      in: query
+      description: Only versions >= this semver (inclusive).
+      schema:
+        type: string
+        pattern: '^\d+\.\d+\.\d+$'
+
+    versionBelow:
+      name: below
+      in: query
+      description: Only versions < this semver (exclusive).
+      schema:
+        type: string
+        pattern: '^\d+\.\d+\.\d+$'
+
+    versionList:
+      name: version
+      in: query
+      description: Exact versions (repeatable, e.g. `?version=1.0.0&version=1.0.1`). Per artifact only.
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
+          pattern: '^\d+\.\d+\.\d+$'
+
+    hasFiles:
+      name: hasFiles
+      in: query
+      description: "`false` = no file at all (any status), `true` = at least one file."
+      schema:
+        type: boolean
+
+    hasIncompleteFiles:
+      name: hasIncompleteFiles
+      in: query
+      description: "`true` = at least one PENDING/ERROR file (interrupted or failed upload)."
+      schema:
+        type: boolean
+
+    minBytes:
+      name: minBytes
+      in: query
+      description: Only versions whose AVAILABLE files total at least this many bytes.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+
+    maxBytes:
+      name: maxBytes
+      in: query
+      description: Only versions whose AVAILABLE files total at most this many bytes.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+
+    deletable:
+      name: deletable
+      in: query
+      description: >
+        `true` hides versions a bulk delete would skip (tagged versions, artifacts with
+        the protection tag), so the list shows exactly what the DELETE with the same
+        filters would remove.
+      schema:
+        type: boolean
+        default: false
+
+    dryRun:
+      name: dryRun
+      in: query
+      description: Report what would be deleted without deleting anything.
+      schema:
+        type: boolean
+        default: false
+
   schemas:
     Error:
       type: object
@@ -125,6 +229,92 @@ components:
         error:
           type: string
           example: "artifact not found"
+
+    MetricsSnapshot:
+      type: object
+      required: [cachedAt, totalArtifacts, totalVersions, totalTags, filesAvailable, filesPending,
+                 filesError, totalStorageBytes, artifactsWithoutTags, artifactsWithoutVersions,
+                 typeCounts, artifactsWithoutFiles, versionsWithoutFiles, brokenTags, unusedTypes,
+                 retentionPolicies, storageBytesByBackend]
+      properties:
+        cachedAt:
+          type: string
+          format: date-time
+          description: When this snapshot was loaded from the database
+        totalArtifacts:
+          type: integer
+          format: int64
+        totalVersions:
+          type: integer
+          format: int64
+        totalTags:
+          type: integer
+          format: int64
+        filesAvailable:
+          type: integer
+          format: int64
+        filesPending:
+          type: integer
+          format: int64
+          description: Files of interrupted uploads
+        filesError:
+          type: integer
+          format: int64
+          description: Files of failed uploads
+        totalStorageBytes:
+          type: integer
+          format: int64
+          description: Sum of size_bytes of AVAILABLE files
+        artifactsWithoutTags:
+          type: integer
+          format: int64
+        artifactsWithoutVersions:
+          type: integer
+          format: int64
+        artifactsWithoutFiles:
+          type: integer
+          format: int64
+          description: Artifacts with versions but no file in any of them
+        versionsWithoutFiles:
+          type: integer
+          format: int64
+          description: Versions with no file at all (any status)
+        brokenTags:
+          type: integer
+          format: int64
+          description: Tags whose version has no AVAILABLE file
+        unusedTypes:
+          type: integer
+          format: int64
+          description: Types assigned to no artifact
+        retentionPolicies:
+          type: integer
+          format: int64
+          description: Stored retention policies (artifact + type)
+        typeCounts:
+          type: array
+          items:
+            type: object
+            required: [typeName, count]
+            properties:
+              typeName:
+                type: string
+              count:
+                type: integer
+                format: int64
+        storageBytesByBackend:
+          type: array
+          description: Bytes of AVAILABLE files per storage backend
+          items:
+            type: object
+            required: [backend, bytes]
+            properties:
+              backend:
+                type: string
+                enum: [FILESYSTEM, S3]
+              bytes:
+                type: integer
+                format: int64
 
     HealthStatus:
       type: object
@@ -200,6 +390,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TypeResponse"
+        versionCount:
+          type: integer
+          format: int32
+        largestVersionBytes:
+          type: integer
+          format: int64
+          description: Byte size of the largest version (sum of its AVAILABLE files)
+        totalBytes:
+          type: integer
+          format: int64
+          description: Byte size of all versions (sum of their AVAILABLE files)
         createdAt:
           type: string
           format: date-time
@@ -291,6 +492,10 @@ components:
           type: ["string", "null"]
           description: Raw configuration string (JSON or YAML)
           example: '{"workers": 4, "timeout": "30s"}'
+        totalBytes:
+          type: integer
+          format: int64
+          description: Sum of the sizes of the version's AVAILABLE files
         tags:
           type: array
           items:
@@ -337,6 +542,178 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/VersionResponse"
+        total:
+          type: integer
+          format: int64
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    TypePage:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypeResponse"
+        total:
+          type: integer
+          format: int64
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    TagListItem:
+      type: object
+      required: [id, artifactId, artifactName, tag, versionId, version, broken, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        artifactId:
+          type: integer
+          format: int64
+        artifactName:
+          type: string
+        tag:
+          type: string
+        versionId:
+          type: integer
+          format: int64
+        version:
+          type: string
+          example: "1.2.3"
+        broken:
+          type: boolean
+          description: The tagged version has no AVAILABLE file
+        updatedAt:
+          type: string
+          format: date-time
+
+    TagListPage:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagListItem"
+        total:
+          type: integer
+          format: int64
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    SetRetentionRequest:
+      type: object
+      description: >
+        At least one field. A rule matches versions outside the newest `keepLast`
+        (by semver) AND older than `maxAgeDays`; an unset field adds no constraint.
+      properties:
+        keepLast:
+          type: integer
+          minimum: 1
+        maxAgeDays:
+          type: integer
+          minimum: 1
+
+    RetentionPolicy:
+      type: object
+      required: [id, artifactId, typeId, keepLast, maxAgeDays, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        artifactId:
+          type: ["integer", "null"]
+          format: int64
+        artifactName:
+          type: string
+          description: Only in the policy list
+        typeId:
+          type: ["integer", "null"]
+          format: int64
+        typeName:
+          type: string
+          description: Only in the policy list
+        keepLast:
+          type: ["integer", "null"]
+        maxAgeDays:
+          type: ["integer", "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    EffectiveRetention:
+      type: object
+      required: [source, rule, own, fromTypes, versionFilter]
+      properties:
+        source:
+          type: string
+          enum: [artifact, types, none]
+        rule:
+          type: ["object", "null"]
+          properties:
+            keepLast:
+              type: ["integer", "null"]
+            maxAgeDays:
+              type: ["integer", "null"]
+        own:
+          oneOf:
+            - $ref: "#/components/schemas/RetentionPolicy"
+            - type: "null"
+        fromTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RetentionPolicy"
+        versionFilter:
+          type: string
+          example: "keepLast=5&olderThan=2026-09-27T10%3A00%3A00Z"
+          description: Query string for the version list / bulk delete; empty when no rule applies
+
+    BulkVersionDeleteResponse:
+      type: object
+      required: [deleted, skipped, dryRun, versions]
+      properties:
+        deleted:
+          type: integer
+          format: int64
+          description: Versions deleted (with dryRun, versions that would be deleted)
+        skipped:
+          type: integer
+          format: int64
+          description: Matching versions kept because a tag points at them or the artifact is protected
+        dryRun:
+          type: boolean
+        versions:
+          type: array
+          items:
+            type: object
+            required: [artifactId, version]
+            properties:
+              artifactId:
+                type: integer
+                format: int64
+              version:
+                type: string
+                example: "1.2.3"
+
+    FilePage:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileResponse"
         total:
           type: integer
           format: int64
@@ -430,6 +807,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
 
+  /q/metrics:
+    get:
+      tags: [Metrics]
+      summary: Registry aggregate metrics
+      description: >
+        Point-in-time counts from one read-only snapshot transaction, cached for
+        `METRICS_CACHE_TTL` (default 60s; concurrent refreshes are collapsed into one).
+        The maintenance indicators match the read filters and admin cleanups:
+        `artifactsWithoutVersions` = `GET /artifacts?maxVersions=0`,
+        `artifactsWithoutFiles` = `?minVersions=1&hasFiles=false`,
+        `versionsWithoutFiles` = `GET /versions?hasFiles=false`,
+        `brokenTags` = `GET /tags?broken=true`, `unusedTypes` = `GET /types?unused=true`.
+        Always public — not behind the `/api/v1` auth middleware.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsSnapshot"
+        "500":
+          description: Database error while refreshing the snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   # ---- Artifacts -------------------------------------------------------------
 
   /api/v1/artifacts:
@@ -437,10 +842,13 @@ paths:
       tags: [Artifacts]
       summary: List artifacts
       description: >
-        Returns a paginated list of artifacts.
-        Use `name` for prefix search, `tag` to filter by assigned tag name, or `type`
-        (repeatable) to filter by type name with OR semantics.
-        Filter precedence: `type` > `name` > `tag`.
+        Returns a paginated list of artifacts. All given filters combine with AND
+        (`type` itself is OR across its values). The maintenance views of the admin
+        API are plain filters here, available to every reader:
+        `maxVersions=0` (no versions), `minVersions=1&hasFiles=false` (versions but no
+        files), `hasIncompleteFiles=true` (PENDING/ERROR uploads).
+        `versionCount` and `largestVersionBytes` are stored per artifact and kept up to
+        date by the database, so sorting by them costs no aggregation.
       operationId: listArtifacts
       parameters:
         - $ref: "#/components/parameters/page"
@@ -469,6 +877,53 @@ paths:
               type: string
           style: form
           explode: true
+        - $ref: "#/components/parameters/olderThanFilter"
+        - name: minVersions
+          in: query
+          description: Only artifacts with at least this many versions.
+          schema:
+            type: integer
+            minimum: 0
+        - name: maxVersions
+          in: query
+          description: Only artifacts with at most this many versions (`0` = artifacts without versions).
+          schema:
+            type: integer
+            minimum: 0
+        - $ref: "#/components/parameters/hasFiles"
+        - $ref: "#/components/parameters/hasIncompleteFiles"
+        - name: missingTag
+          in: query
+          description: Only artifacts that do NOT have this tag (e.g. `latest`).
+          schema:
+            type: string
+        - name: minTotalBytes
+          in: query
+          description: Only artifacts whose versions total at least this many bytes.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: hasRetention
+          in: query
+          description: Whether a retention rule applies (own policy or via one of its types).
+          schema:
+            type: boolean
+        - name: sort
+          in: query
+          description: >
+            `largestVersion` = byte size of the artifact's largest version (sum of its
+            AVAILABLE files), `totalSize` = bytes of all its versions.
+          schema:
+            type: string
+            enum: [createdAt, name, versionCount, largestVersion, totalSize]
+            default: createdAt
+        - name: order
+          in: query
+          description: Defaults to `asc` for `name`, `desc` otherwise.
+          schema:
+            type: string
+            enum: [asc, desc]
       responses:
         "200":
           description: Paginated artifact list
@@ -476,6 +931,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ArtifactPage"
+        "400":
+          description: Invalid filter or sort value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
     post:
       tags: [Artifacts]
@@ -583,8 +1044,23 @@ paths:
     get:
       tags: [Versions]
       summary: List versions
-      description: Returns all versions for the artifact, ordered newest first (major, minor, patch DESC).
+      description: >
+        Returns the artifact's versions, newest first (major, minor, patch DESC).
+        Accepts the same filters as the bulk delete on this path (combined with AND),
+        so a UI can show what a cleanup would hit; add `deletable=true` to see exactly
+        the versions the DELETE would remove.
       operationId: listVersions
+      parameters:
+        - $ref: "#/components/parameters/keepLast"
+        - $ref: "#/components/parameters/olderThanFilter"
+        - $ref: "#/components/parameters/versionFrom"
+        - $ref: "#/components/parameters/versionBelow"
+        - $ref: "#/components/parameters/versionList"
+        - $ref: "#/components/parameters/hasFiles"
+        - $ref: "#/components/parameters/hasIncompleteFiles"
+        - $ref: "#/components/parameters/minBytes"
+        - $ref: "#/components/parameters/maxBytes"
+        - $ref: "#/components/parameters/deletable"
       responses:
         "200":
           description: Version list
@@ -594,6 +1070,12 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/VersionResponse"
+        "400":
+          description: Invalid filter value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: Artifact not found
           content:
@@ -635,6 +1117,81 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: Version already exists for this artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Versions]
+      summary: Bulk delete versions
+      description: >
+        Deletes the versions of this artifact matching the filters, with their files.
+        All given filters must match (AND); at least one is required. Versions a tag
+        points at, and every version of an artifact carrying the protection tag, are
+        never deleted and are counted as `skipped`. Files of deleted versions are
+        removed from storage (best-effort, after the DB commit).
+      operationId: bulkDeleteVersions
+      parameters:
+        - $ref: "#/components/parameters/keepLast"
+        - $ref: "#/components/parameters/olderThanFilter"
+        - $ref: "#/components/parameters/versionFrom"
+        - $ref: "#/components/parameters/versionBelow"
+        - $ref: "#/components/parameters/versionList"
+        - $ref: "#/components/parameters/hasFiles"
+        - $ref: "#/components/parameters/hasIncompleteFiles"
+        - $ref: "#/components/parameters/minBytes"
+        - $ref: "#/components/parameters/maxBytes"
+        - $ref: "#/components/parameters/dryRun"
+      responses:
+        "200":
+          description: Deleted (or, with dryRun, deletable) versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkVersionDeleteResponse"
+        "400":
+          description: No filter given or invalid filter value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/versions:
+    get:
+      tags: [Versions]
+      summary: List versions across all artifacts
+      description: >
+        Paginated, ordered by artifact then newest version first. Same filters as
+        `DELETE /api/v1/admin/versions` — its read-only counterpart for every reader.
+      operationId: listAllVersions
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+        - $ref: "#/components/parameters/keepLast"
+        - $ref: "#/components/parameters/olderThanFilter"
+        - $ref: "#/components/parameters/versionFrom"
+        - $ref: "#/components/parameters/versionBelow"
+        - $ref: "#/components/parameters/hasFiles"
+        - $ref: "#/components/parameters/hasIncompleteFiles"
+        - $ref: "#/components/parameters/minBytes"
+        - $ref: "#/components/parameters/maxBytes"
+        - $ref: "#/components/parameters/deletable"
+      responses:
+        "200":
+          description: Paginated version list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionPage"
+        "400":
+          description: Invalid filter value (`version` is per artifact only)
           content:
             application/json:
               schema:
@@ -691,6 +1248,109 @@ paths:
                 $ref: "#/components/schemas/Error"
 
   # ---- Tags ------------------------------------------------------------------
+
+  /api/v1/tags:
+    get:
+      tags: [Tags]
+      summary: List tags across all artifacts
+      description: >
+        Paginated, ordered by artifact name then tag. `broken=true` lists tags whose
+        version has no AVAILABLE file — resolving them yields nothing downloadable.
+      operationId: listAllTags
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+        - name: tag
+          in: query
+          description: Exact tag name (e.g. `latest`).
+          schema:
+            type: string
+        - name: broken
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Paginated tag list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagListPage"
+        "400":
+          description: Invalid filter value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/artifacts/{id}/retention:
+    parameters:
+      - $ref: "#/components/parameters/artifactId"
+    get:
+      tags: [Retention]
+      summary: Effective retention rule of an artifact
+      description: >
+        The artifact's own policy if it has one, otherwise the most conservative merge
+        of its types' policies (per field the maximum). `versionFilter` is the matching
+        query string for the version list / bulk delete, with `olderThan` computed now.
+      operationId: getArtifactRetention
+      responses:
+        "200":
+          description: Effective rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EffectiveRetention"
+        "404":
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    put:
+      tags: [Retention]
+      summary: Set the artifact's own retention policy
+      operationId: setArtifactRetention
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRetentionRequest"
+      responses:
+        "200":
+          description: Stored policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionPolicy"
+        "400":
+          description: Neither keepLast nor maxAgeDays, or a value < 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Retention]
+      summary: Remove the artifact's own retention policy
+      operationId: deleteArtifactRetention
+      responses:
+        "204":
+          description: Removed
+        "404":
+          description: No policy on this artifact
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/v1/artifacts/{id}/tags/{tag}:
     parameters:
@@ -755,6 +1415,17 @@ paths:
       tags: [Files]
       summary: List files
       operationId: listFiles
+      parameters:
+        - name: status
+          in: query
+          description: Only files with these statuses (repeatable, e.g. `?status=PENDING&status=ERROR`).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [PENDING, AVAILABLE, ERROR]
       responses:
         "200":
           description: File list
@@ -765,7 +1436,7 @@ paths:
                 items:
                   $ref: "#/components/schemas/FileResponse"
         "400":
-          description: Malformed semver
+          description: Malformed semver or unknown status
           content:
             application/json:
               schema:
@@ -866,8 +1537,14 @@ paths:
     get:
       tags: [Types]
       summary: List types
-      description: Returns all artifact types ordered by name.
+      description: Returns artifact types ordered by name.
       operationId: listTypes
+      parameters:
+        - name: unused
+          in: query
+          description: "`true` = only types assigned to no artifact, `false` = only assigned ones."
+          schema:
+            type: boolean
       responses:
         "200":
           description: Type list
@@ -980,6 +1657,87 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+
+  /api/v1/types/{typeId}/retention:
+    parameters:
+      - $ref: "#/components/parameters/typeId"
+    get:
+      tags: [Retention]
+      summary: Retention policy of a type
+      operationId: getTypeRetention
+      responses:
+        "200":
+          description: Stored policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionPolicy"
+        "404":
+          description: No policy on this type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    put:
+      tags: [Retention]
+      summary: Set the type's retention policy
+      description: Applies to every artifact of this type that has no policy of its own.
+      operationId: setTypeRetention
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRetentionRequest"
+      responses:
+        "200":
+          description: Stored policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetentionPolicy"
+        "400":
+          description: Neither keepLast nor maxAgeDays, or a value < 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Type not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Retention]
+      summary: Remove the type's retention policy
+      operationId: deleteTypeRetention
+      responses:
+        "204":
+          description: Removed
+        "404":
+          description: No policy on this type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/retention-policies:
+    get:
+      tags: [Retention]
+      summary: List all retention policies
+      operationId: listRetentionPolicies
+      responses:
+        "200":
+          description: All stored policies with artifact or type name
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RetentionPolicy"
 
   /api/v1/artifacts/{id}/types:
     parameters:
@@ -1129,6 +1887,42 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /api/v1/admin/versions:
+    delete:
+      tags: [Admin]
+      summary: Bulk delete versions across all artifacts
+      description: >
+        Applies the version bulk-delete filters to every artifact (`keepLast` counts
+        per artifact). The `version` list filter is only available per artifact.
+        All given filters must match (AND); at least one is required. Versions a tag
+        points at, and every version of an artifact carrying the protection tag, are
+        never deleted and are counted as `skipped`. Files of deleted versions are
+        removed from storage (best-effort, after the DB commit).
+      operationId: adminBulkDeleteVersions
+      parameters:
+        - $ref: "#/components/parameters/keepLast"
+        - $ref: "#/components/parameters/olderThanFilter"
+        - $ref: "#/components/parameters/versionFrom"
+        - $ref: "#/components/parameters/versionBelow"
+        - $ref: "#/components/parameters/hasFiles"
+        - $ref: "#/components/parameters/hasIncompleteFiles"
+        - $ref: "#/components/parameters/minBytes"
+        - $ref: "#/components/parameters/maxBytes"
+        - $ref: "#/components/parameters/dryRun"
+      responses:
+        "200":
+          description: Deleted (or, with dryRun, deletable) versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkVersionDeleteResponse"
+        "400":
+          description: No filter given or invalid filter value
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /api/v1/admin/versions/empty:
     get:
       tags: [Admin]
@@ -1162,6 +1956,103 @@ paths:
         Deletes all versions that have no files and were created before `olderThan`.
         Versions whose parent artifact carries the configured protection tag are skipped.
       operationId: adminDeleteVersionsWithoutFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteResponse"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/types/unused:
+    get:
+      tags: [Admin]
+      summary: List types assigned to no artifact
+      operationId: adminListUnusedTypes
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: Paginated list of unused types
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TypePage"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Admin]
+      summary: Bulk delete types assigned to no artifact
+      description: Their retention policies are deleted with them.
+      operationId: adminDeleteUnusedTypes
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkDeleteResponse"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/v1/admin/files/incomplete:
+    get:
+      tags: [Admin]
+      summary: List incomplete (PENDING/ERROR) files
+      description: >
+        Returns a paginated list of files whose upload never completed — status
+        `PENDING` (interrupted upload) or `ERROR` (failed upload) — and were created
+        before `olderThan`. Such files are never downloadable but keep their version
+        from counting as file-less.
+      operationId: adminListIncompleteFiles
+      parameters:
+        - $ref: "#/components/parameters/olderThan"
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/pageSize"
+      responses:
+        "200":
+          description: Paginated list of incomplete files
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilePage"
+        "400":
+          description: Missing or invalid olderThan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      tags: [Admin]
+      summary: Bulk delete incomplete (PENDING/ERROR) files
+      description: >
+        Deletes all `PENDING`/`ERROR` files created before `olderThan`, including
+        (best-effort) any partial object a failed upload left in storage. Files of
+        artifacts carrying the configured protection tag are skipped. Choose
+        `olderThan` well in the past so uploads still in flight are not hit.
+      operationId: adminDeleteIncompleteFiles
       parameters:
         - $ref: "#/components/parameters/olderThan"
       responses:

@@ -42,16 +42,18 @@ internal/
     ├── router.go               # gin setup, routes, CORS
     ├── openapi/
     │   ├── handler.go          # //go:embed openapi.yaml; serves spec + Swagger UI
-    │   └── openapi.yaml        # hand-written OpenAPI 3.1 spec (all 32 ops)
+    │   └── openapi.yaml        # hand-written OpenAPI 3.1 spec (all 48 ops)
     ├── middleware/
     │   └── auth.go             # Gin middleware: K8s SA token validation via TokenReview API, uses internal/k8sclient
     ├── handlers/
     │   ├── artifacts.go        # CRUD on registry_artifact
     │   ├── versions.go         # CRUD on registry_artifact_version + tag-on-create
+    │   ├── version_bulk.go     # filteredVersions: shared version filters for the version lists AND the bulk deletes
     │   ├── files.go            # multipart upload / download / delete
     │   ├── tags.go             # PUT/DELETE tags (upsert moves tag)
     │   ├── types.go             # CRUD on registry_artifact_type + artifact type assignment (M:N)
-    │   ├── admin.go             # bulk cleanup of empty/file-less artifacts & versions
+    │   ├── retention.go        # retention policies per artifact/type + effective rule (stored only, applied externally)
+    │   ├── admin.go             # bulk cleanup of empty/file-less artifacts & versions, PENDING/ERROR files
     │   ├── metrics.go          # GET /q/metrics — loads Snapshot via metrics.Cache
     │   └── helpers.go          # pathID, pathFileID, pathSemver, isUniqueViolation, isNotFound
     └── dto/
@@ -65,12 +67,13 @@ sqlc.yaml                       # sqlc config
 ## DB Schema
 | Table | Key columns |
 |---|---|
-| `registry_artifact` | `id`, `full_name VARCHAR(500) UNIQUE`, `description TEXT` |
-| `registry_artifact_version` | `id`, `artifact_id FK`, `major/minor/patch INT`, `config TEXT`; UNIQUE `(artifact_id, major, minor, patch)` |
+| `registry_artifact` | `id`, `full_name VARCHAR(500) UNIQUE`, `description TEXT`, `version_count INT`, `largest_version_bytes BIGINT`, `total_bytes BIGINT` (all trigger-maintained) |
+| `registry_artifact_version` | `id`, `artifact_id FK`, `major/minor/patch INT`, `config TEXT`, `total_bytes BIGINT` (trigger-maintained); UNIQUE `(artifact_id, major, minor, patch)` |
 | `registry_artifact_file` | `id`, `version_id FK`, `name`, `content_type`, `size_bytes`, `storage_backend`, `storage_path`, `status`; UNIQUE `(version_id, name)` |
 | `registry_artifact_tag` | `id`, `artifact_id FK`, `tag VARCHAR(255)`, `version_id FK`; UNIQUE `(artifact_id, tag)` |
 | `registry_artifact_type` | `id`, `name VARCHAR(255) UNIQUE`, `description TEXT` |
 | `registry_artifact_type_map` | `id`, `artifact_id FK`, `type_id FK`; UNIQUE `(artifact_id, type_id)` |
+| `registry_retention_policy` | `id`, `artifact_id FK UNIQUE` XOR `type_id FK UNIQUE`, `keep_last INT`, `max_age_days INT` (at least one) |
 
 ## Key Conventions
 - **`pg_dump`/`psql` in the runtime image:** no Alpine (production can `apt`, not `apk`). The runtime image is distroless `gcr.io/distroless/base-debian13` (glibc + CA certs, no shell, no package manager — like the other fusion images, but `base` instead of `static` because `pg_dump`/`psql` are dynamically linked); a `pgclient` stage copies `pg_dump`/`psql` plus their `ldd`-resolved shared libraries (minus glibc) out of the official `postgres:${PG_MAJOR}-trixie` image into `/usr/local/lib/pgclient`, found via `LD_LIBRARY_PATH` (no shell, so no `ldconfig`). Both images must stay on the same Debian release (13/trixie) so the copied libs match distroless' glibc. Runs as distroless `:nonroot` (UID/GID 65532): `backend.podSecurityContext` defaults to the same IDs plus `fsGroup: 65532` so the artifacts PVC is writable, and the image pre-creates `/data/artifacts` owned by 65532 for FILESYSTEM without a PVC. A PVC full of files written by the old root image is not writable for it — on dev it was reset (uninstall + fresh install); in production use S3 or chown the volume once. `PG_MAJOR` (build arg, default 18) must be >= the newest server backed up: `pg_dump` aborts with "server version mismatch" against a newer server (the old `postgresql16-client` failed against Bitnami `postgresql:latest`, which is 18). An older server is fine for dumping, but pg_dump >= 17 writes `SET transaction_timeout = 0;` into every dump, which servers < 17 reject — `restore-db` strips that line from the dump preamble (`stripIncompatibleSettings` in `restore.go`).
@@ -95,24 +98,33 @@ sqlc.yaml                       # sqlc config
 - **S3 multi-instance prefix:** `S3_PREFIX` (Helm: `s3.prefix`) namespaces every object key under a bucket so multiple fusion-index instances can share one bucket without colliding. Applied inside `S3Storage` (`internal/storage/s3.go`) via `path.Join(prefix, relativePath)` — never stored in the DB (see Storage paths above). Left empty, the Helm chart computes `<kubernetes-namespace>/index/data` (`fusion-index.s3Prefix` in `_helpers.tpl`) rather than a fixed literal, so every instance gets a collision-free default with zero configuration. The Go binary's own bare env var default (when run outside Helm, e.g. local dev) is the literal `index` — it has no way to know a "namespace" outside a cluster.
 - **Tag upsert:** `ON CONFLICT (artifact_id, tag) DO UPDATE SET version_id = EXCLUDED.version_id` — atomically moves a tag to a new version; no application-level conflict check needed.
 - **Two-phase file upload:** create DB row (status=PENDING) → `storage.Store` → `UpdateArtifactFileStored` (status=AVAILABLE). On storage error: mark ERROR. On DB update error: mark ERROR + `storage.Delete` to avoid orphans.
+- **PENDING/ERROR rows keep the `"pending"` placeholder in `storage_path`** (only `UpdateArtifactFileStored` writes the real one). Every storage delete goes through `fileObjectPath()` (`handlers/helpers.go`): `storage_path` for AVAILABLE rows, otherwise the path rebuilt with `fileStoragePath()`, the same helper the upload uses. Never pass `storage_path` of a non-AVAILABLE row to `storage.Delete`.
+- **Show = delete:** every version filter lives in one query, `ListVersionsFiltered` (`registry_versions.sql`), used by both version lists and both bulk deletes — add new version filters there, never to only one side. Filters belong on the normal read routes (BFF grants `GET /api/index/*` to `index:artifacts:read`, `/admin/*` needs `index:admin:manage`); admin routes only add the destructive part. Same for artifacts: `ListRegistryArtifactsFiltered`/`CountRegistryArtifactsFiltered` must keep identical WHERE clauses.
+- **Retention policies are stored, never applied by fusion-index:** the effective rule of an artifact is its own policy, else the per-field max over its types' policies (a rule deletes only what is outside `keepLast` AND older than `maxAgeDays`, so the max is the conservative merge). `versionFilter` in `GET /artifacts/{id}/retention` is the bulk-delete query string — the external runner (planned maintenance pod) should use it rather than re-implementing the merge.
+- **Size/count statistics are trigger-maintained (migration 000009):** never update `total_bytes`/`version_count`/`largest_version_bytes` from Go — the triggers cover every path including cascades and `restore-db`. The version trigger takes `SELECT ... FOR UPDATE` on the artifact row in its own statement before recomputing; under READ COMMITTED that gives the recompute a fresh snapshot after earlier writers committed — don't merge the two statements. Measured on 10k artifacts / 270k versions / 1M files: list sorts 1–3 ms, `hasIncompleteFiles` ~45–90 ms (partial index `idx_artifact_file_incomplete`), registry-wide `keepLast` ~65 ms. Anything heavier is for the planned maintenance pod, not request handlers.
+- **Bulk version delete is DB-first:** in one transaction list the files, then `DeleteUnprotectedVersionsByIDs` (re-checks tags, so a tag assigned after the candidate list still saves its version); commit; only then delete storage objects best-effort. A crash leaves orphaned objects, never DB rows pointing at deleted objects. Storage deletes run one by one inside the request; batch them (S3 `DeleteObjects`) if a single call ever has to remove tens of thousands of files.
 
 ## REST API (validated)
 
 | Method | Path | Description |
 |---|---|---|
-| GET/POST | `/api/v1/artifacts` | List (filter `?name=` prefix, `?tag=`, `?type=` repeatable) / create |
+| GET/POST | `/api/v1/artifacts` | List (AND-combined `name` prefix, `tag`, `type` (repeatable), `olderThan`, `minVersions`/`maxVersions`, `hasFiles`, `hasIncompleteFiles`, `missingTag`, `minTotalBytes`, `hasRetention`; `sort=createdAt\|name\|versionCount\|largestVersion\|totalSize`, `order=asc\|desc`) / create |
 | GET/PUT/DELETE | `/api/v1/artifacts/{id}` | Get / update description / delete artifact |
-| GET/POST | `/api/v1/artifacts/{id}/versions` | List / create version (body: `version`, `config`, `tags[]`) |
+| GET/POST | `/api/v1/artifacts/{id}/versions` | List (same filters as the bulk delete + `deletable=true`) / create version (body: `version`, `config`, `tags[]`) |
+| GET | `/api/v1/versions` | Versions across all artifacts, paginated, same filters (read-only counterpart of `DELETE /admin/versions`) |
+| DELETE | `/api/v1/artifacts/{id}/versions`, `/api/v1/admin/versions` | Bulk delete versions + files (`keepLast`, `olderThan`, `from`/`below`, `version` per artifact only, `dryRun`); skips tagged versions and `ADMIN_PROTECTED_TAG` artifacts |
 | GET/DELETE | `/api/v1/artifacts/{id}/versions/{semver}` | Get / delete version |
 | PUT/DELETE | `/api/v1/artifacts/{id}/tags/{tag}` | Assign (`{"version":"1.2.3"}`) / delete tag |
+| GET | `/api/v1/tags` | Tags across all artifacts, paginated (`tag=`, `broken=true`) |
+| GET/PUT/DELETE | `/api/v1/artifacts/{id}/retention`, `/api/v1/types/{typeId}/retention` (+GET `/api/v1/retention-policies`) | Retention policies; artifact GET returns the effective rule + `versionFilter` |
 | GET/POST | `/api/v1/artifacts/{id}/versions/{semver}/files` | List / upload file (multipart) |
-| GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | File metadata |
+| GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | File metadata (list above takes `?status=` repeatable) |
 | GET | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}/download` | Download stream |
 | DELETE | `/api/v1/artifacts/{id}/versions/{semver}/files/{fileId}` | Delete file |
-| GET/POST | `/api/v1/types` | List / create artifact type |
+| GET/POST | `/api/v1/types` | List (`?unused=`) / create artifact type |
 | GET/PUT/DELETE | `/api/v1/types/{typeId}` | Get / update / delete type |
 | GET/PUT/DELETE | `/api/v1/artifacts/{id}/types/{typeId}` (+GET on `/types`) | List / assign / unassign type on an artifact |
-| GET/DELETE | `/api/v1/admin/artifacts/empty`, `/admin/versions/empty`, `/admin/artifacts/no-files` | List / bulk-delete abandoned data (requires `?olderThan=`, skips `ADMIN_PROTECTED_TAG`) |
+| GET/DELETE | `/api/v1/admin/artifacts/empty`, `/admin/versions/empty`, `/admin/artifacts/no-files`, `/admin/files/incomplete`, `/admin/types/unused` | List / bulk-delete abandoned data (requires `?olderThan=`, skips `ADMIN_PROTECTED_TAG`) |
 | GET | `/q/health/live`, `/q/health/ready` | Kubernetes health probes |
 | GET | `/q/metrics` | Registry aggregate metrics (TTL-cached, always public) |
 | GET | `/api/openapi.json` | OpenAPI 3.1 spec as JSON |

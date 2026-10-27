@@ -9,11 +9,14 @@ import (
 )
 
 type RegistryArtifact struct {
-	ID          int64              `json:"id"`
-	FullName    string             `json:"full_name"`
-	Description *string            `json:"description"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID                  int64              `json:"id"`
+	FullName            string             `json:"full_name"`
+	Description         *string            `json:"description"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	VersionCount        int32              `json:"version_count"`
+	LargestVersionBytes int64              `json:"largest_version_bytes"`
+	TotalBytes          int64              `json:"total_bytes"`
 }
 
 type RegistryArtifactFile struct {
@@ -61,4 +64,15 @@ type RegistryArtifactVersion struct {
 	Patch      int32              `json:"patch"`
 	Config     *string            `json:"config"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	TotalBytes int64              `json:"total_bytes"`
+}
+
+type RegistryRetentionPolicy struct {
+	ID         int64              `json:"id"`
+	ArtifactID *int64             `json:"artifact_id"`
+	TypeID     *int64             `json:"type_id"`
+	KeepLast   *int32             `json:"keep_last"`
+	MaxAgeDays *int32             `json:"max_age_days"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
 }

@@ -7,7 +7,22 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countIncompleteFiles = `-- name: CountIncompleteFiles :one
+SELECT COUNT(*) FROM registry_artifact_file
+WHERE status IN ('PENDING', 'ERROR')
+  AND created_at < $1
+`
+
+func (q *Queries) CountIncompleteFiles(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
+	row := q.db.QueryRow(ctx, countIncompleteFiles, createdAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const createArtifactFile = `-- name: CreateArtifactFile :one
 INSERT INTO registry_artifact_file (version_id, name, content_type, storage_backend, storage_path, status)
@@ -54,6 +69,64 @@ DELETE FROM registry_artifact_file WHERE id = $1
 func (q *Queries) DeleteArtifactFile(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, deleteArtifactFile, id)
 	return err
+}
+
+const deleteIncompleteFiles = `-- name: DeleteIncompleteFiles :many
+WITH deleted AS (
+  DELETE FROM registry_artifact_file f
+  WHERE f.status IN ('PENDING', 'ERROR')
+    AND f.created_at < $1
+    AND NOT EXISTS (
+      SELECT 1 FROM registry_artifact_version v
+      JOIN registry_artifact_tag rat ON rat.artifact_id = v.artifact_id
+      WHERE v.id = f.version_id AND rat.tag = $2
+    )
+  RETURNING f.id, f.name, f.version_id
+)
+SELECT d.id, d.name, v.artifact_id, v.major, v.minor, v.patch
+FROM deleted d
+JOIN registry_artifact_version v ON v.id = d.version_id
+`
+
+type DeleteIncompleteFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Tag       string             `json:"tag"`
+}
+
+type DeleteIncompleteFilesRow struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	ArtifactID int64  `json:"artifact_id"`
+	Major      int32  `json:"major"`
+	Minor      int32  `json:"minor"`
+	Patch      int32  `json:"patch"`
+}
+
+func (q *Queries) DeleteIncompleteFiles(ctx context.Context, arg DeleteIncompleteFilesParams) ([]DeleteIncompleteFilesRow, error) {
+	rows, err := q.db.Query(ctx, deleteIncompleteFiles, arg.CreatedAt, arg.Tag)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeleteIncompleteFilesRow
+	for rows.Next() {
+		var i DeleteIncompleteFilesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ArtifactID,
+			&i.Major,
+			&i.Minor,
+			&i.Patch,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getArtifactFile = `-- name: GetArtifactFile :one
@@ -137,6 +210,156 @@ func (q *Queries) ListAvailableS3FilePaths(ctx context.Context) ([]string, error
 			return nil, err
 		}
 		items = append(items, storage_path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFilesByArtifactID = `-- name: ListFilesByArtifactID :many
+SELECT f.id, f.version_id, f.name, f.content_type, f.size_bytes, f.storage_backend, f.storage_path, f.status, f.created_at, f.updated_at, v.major, v.minor, v.patch
+FROM registry_artifact_file f
+JOIN registry_artifact_version v ON v.id = f.version_id
+WHERE v.artifact_id = $1
+ORDER BY f.id
+`
+
+type ListFilesByArtifactIDRow struct {
+	RegistryArtifactFile RegistryArtifactFile `json:"registry_artifact_file"`
+	Major                int32                `json:"major"`
+	Minor                int32                `json:"minor"`
+	Patch                int32                `json:"patch"`
+}
+
+// All files of an artifact with their version coordinates, so the artifact delete
+// can remove the storage objects after the cascade has dropped the rows.
+func (q *Queries) ListFilesByArtifactID(ctx context.Context, artifactID int64) ([]ListFilesByArtifactIDRow, error) {
+	rows, err := q.db.Query(ctx, listFilesByArtifactID, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListFilesByArtifactIDRow
+	for rows.Next() {
+		var i ListFilesByArtifactIDRow
+		if err := rows.Scan(
+			&i.RegistryArtifactFile.ID,
+			&i.RegistryArtifactFile.VersionID,
+			&i.RegistryArtifactFile.Name,
+			&i.RegistryArtifactFile.ContentType,
+			&i.RegistryArtifactFile.SizeBytes,
+			&i.RegistryArtifactFile.StorageBackend,
+			&i.RegistryArtifactFile.StoragePath,
+			&i.RegistryArtifactFile.Status,
+			&i.RegistryArtifactFile.CreatedAt,
+			&i.RegistryArtifactFile.UpdatedAt,
+			&i.Major,
+			&i.Minor,
+			&i.Patch,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFilesByVersionIDs = `-- name: ListFilesByVersionIDs :many
+SELECT id, version_id, name, content_type, size_bytes, storage_backend, storage_path, status, created_at, updated_at FROM registry_artifact_file
+WHERE version_id = ANY($1::bigint[])
+ORDER BY id
+`
+
+func (q *Queries) ListFilesByVersionIDs(ctx context.Context, versionIds []int64) ([]RegistryArtifactFile, error) {
+	rows, err := q.db.Query(ctx, listFilesByVersionIDs, versionIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RegistryArtifactFile
+	for rows.Next() {
+		var i RegistryArtifactFile
+		if err := rows.Scan(
+			&i.ID,
+			&i.VersionID,
+			&i.Name,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.StorageBackend,
+			&i.StoragePath,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIncompleteFiles = `-- name: ListIncompleteFiles :many
+SELECT f.id, f.version_id, f.name, f.content_type, f.size_bytes, f.storage_backend, f.storage_path, f.status, f.created_at, f.updated_at, v.artifact_id, v.major, v.minor, v.patch
+FROM registry_artifact_file f
+JOIN registry_artifact_version v ON v.id = f.version_id
+WHERE f.status IN ('PENDING', 'ERROR')
+  AND f.created_at < $1
+ORDER BY f.id
+LIMIT $2 OFFSET $3
+`
+
+type ListIncompleteFilesParams struct {
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Limit     int32              `json:"limit"`
+	Offset    int32              `json:"offset"`
+}
+
+type ListIncompleteFilesRow struct {
+	RegistryArtifactFile RegistryArtifactFile `json:"registry_artifact_file"`
+	ArtifactID           int64                `json:"artifact_id"`
+	Major                int32                `json:"major"`
+	Minor                int32                `json:"minor"`
+	Patch                int32                `json:"patch"`
+}
+
+// PENDING/ERROR files left behind by interrupted or failed uploads (admin cleanup).
+// The version coordinates are returned so callers can rebuild the storage path:
+// storage_path is still the 'pending' placeholder for these rows.
+func (q *Queries) ListIncompleteFiles(ctx context.Context, arg ListIncompleteFilesParams) ([]ListIncompleteFilesRow, error) {
+	rows, err := q.db.Query(ctx, listIncompleteFiles, arg.CreatedAt, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListIncompleteFilesRow
+	for rows.Next() {
+		var i ListIncompleteFilesRow
+		if err := rows.Scan(
+			&i.RegistryArtifactFile.ID,
+			&i.RegistryArtifactFile.VersionID,
+			&i.RegistryArtifactFile.Name,
+			&i.RegistryArtifactFile.ContentType,
+			&i.RegistryArtifactFile.SizeBytes,
+			&i.RegistryArtifactFile.StorageBackend,
+			&i.RegistryArtifactFile.StoragePath,
+			&i.RegistryArtifactFile.Status,
+			&i.RegistryArtifactFile.CreatedAt,
+			&i.RegistryArtifactFile.UpdatedAt,
+			&i.ArtifactID,
+			&i.Major,
+			&i.Minor,
+			&i.Patch,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
