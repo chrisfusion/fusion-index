@@ -263,7 +263,7 @@ Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the
 - **README.md/API_ARCHITECTURE.md/EXAMPLES.md drift silently:** unlike `openapi.yaml` (embedded + served, effectively self-checking), these are hand-maintained prose with nothing enforcing sync. The Types and Admin APIs shipped fully coded and in `openapi.yaml` but went undocumented in all three — and in this file's own REST API table above — for months. When adding an endpoint, grep all four for existing resource names before calling the work done.
 
 ## Branch Strategy
-`main` → `develop` → `feature/*`
+Commit directly to `main` and push it to `origin` — no `develop` or feature branches.
 
 ## Commit Style
 Conventional Commits: `feat:`, `fix:`, `chore:`, `refactor:`
