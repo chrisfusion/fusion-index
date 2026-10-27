@@ -2,8 +2,8 @@ apiVersion: v2
 name: fusion-index
 description: Fusion Index — Job Registry (Quarkus backend + Vue.js Module Federation remote)
 type: application
-version: 0.5.4
-appVersion: "0.5.1"
+version: 0.6.0
+appVersion: "0.6.0"
 
 keywords:
   - fusion

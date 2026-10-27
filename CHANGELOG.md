@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-27
+
 ### Added
 - **Tag hygiene**: `GET /api/v1/tags` lists tags across all artifacts (paginated, `tag=`, `broken=true` = tagged version has no AVAILABLE file); artifact list filter `missingTag=` (e.g. artifacts without `latest`)
 - **Unused types**: `GET /api/v1/types?unused=true|false`; `GET`/`DELETE /api/v1/admin/types/unused?olderThan=` lists / bulk-deletes types assigned to no artifact

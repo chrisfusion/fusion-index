@@ -18,7 +18,7 @@ createNamespace: false
 backend:
   image:
     pullPolicy: Never   # image loaded directly into minikube — no registry pull
-    tag: latest
+    tag: "0.6.0"
   storageBackend: FILESYSTEM   # no S3 in local dev
   ginMode: debug
   persistence:
