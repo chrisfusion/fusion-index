@@ -90,6 +90,7 @@ sqlc.yaml                       # sqlc config
 - **Read-only snapshot transactions:** Wrap multi-query aggregate reads in `pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})` + `q.WithTx(tx)` to prevent inconsistent snapshots.
 - golang-migrate uses `lib/pq` internally (not pgx). Append `?sslmode=disable` to DBURL or migrations fail.
 - Regenerate after SQL changes: `~/go/bin/sqlc generate`
+- **sqlc limits:** `RETURNING` can't reference a `DELETE ... USING` table — use a data-modifying CTE (`WITH d AS (DELETE ... RETURNING ...) SELECT ... FROM d JOIN ...`); `sqlc.embed()` works on tables, not CTEs — select explicit columns; `LIMIT sqlc.narg(x)::int` works (NULL = no limit); `COUNT(*) OVER () AS total_count` totals need a re-query when the page is past the end (see `VersionHandler.ListAll`).
 - Transactions via `q.WithTx(tx)` for atomic operations (version create + tag upsert, artifact create + name check, etc.).
 - Nullable columns from sqlc become `*string` / `*int64` (`emit_pointers_for_null_types: true`).
 - Error responses always have shape `{"error": "..."}`.
@@ -132,7 +133,7 @@ sqlc.yaml                       # sqlc config
 
 ## Vendoring (offline builds)
 
-Go dependencies are vendored and committed (`vendor/`, ~51 MB on disk) because the CI environment that builds the images has no internet access (builds must not download anything). The Makefile targets and the Dockerfile use `-mod=vendor` (the Dockerfile has no `go mod download`). After any `go.mod` change run `make vendor` and commit `vendor/` with `go.mod`/`go.sum`; `make check-vendor` fails on drift. `vendor/**` is `-diff linguist-vendored` in `.gitattributes`. The runtime stage still runs `apk add ca-certificates postgresql16-client`, which needs an Alpine package mirror (not a Go dependency, so vendoring does not cover it); the unused `apk add git` was dropped from the build stage. Remaining external inputs: the Docker base images (`golang:1.25-alpine`, `alpine:3.19`) — mirror them in an internal registry or `docker save`/`docker load` them. Outside Docker the pinned Go toolchain must be installed (`GOTOOLCHAIN=local`). Verify with `docker build --network none .`. Blueprint: `docs/go-vendoring-blueprint.md`.
+Go dependencies are vendored and committed (`vendor/`, ~51 MB on disk) because the CI environment that builds the images has no internet access (builds must not download anything). The Makefile targets and the Dockerfile use `-mod=vendor` (the Dockerfile has no `go mod download`). After any `go.mod` change run `make vendor` and commit `vendor/` with `go.mod`/`go.sum`; `make check-vendor` fails on drift. `vendor/**` is `-diff linguist-vendored` in `.gitattributes`. No package manager runs during the build (distroless runtime; `pg_dump`/`psql` are copied from the postgres image, see Key Conventions). Remaining external inputs: the base images `golang:1.25-trixie`, `postgres:${PG_MAJOR}-trixie`, `gcr.io/distroless/base-debian13:nonroot` — mirror them in an internal registry or `docker save`/`docker load` them. Outside Docker the pinned Go toolchain must be installed (`GOTOOLCHAIN=local`). Verify with `docker build --network none .`. Blueprint: `docs/go-vendoring-blueprint.md`.
 
 ## Environment Variables
 
@@ -160,10 +161,15 @@ Go dependencies are vendored and committed (`vendor/`, ~51 MB on disk) because t
 ## Local Testing
 
 ```bash
-go test ./tests/integration/... -timeout 120s
+go test -mod=vendor -count=1 ./...                    # -count=1: integration results are cached otherwise
+docker build --network none -t fusion-index:check .   # offline build check (see Vendoring)
 ```
 
 Uses testcontainers-go to spin up a real PostgreSQL container. Docker must be running.
+- One DB for the whole run: use unique name prefixes per test; registry-wide endpoints (`/admin/versions`, `/versions`) get unique semver ranges (800.x, 900.x) so they never touch other tests' data.
+- `testQueries` / `testArtifactDir` (`main_test.go`): plant PENDING/ERROR rows only failed uploads produce (`createFileRow`) and check storage objects on disk. The test server runs with `AdminProtectedTag: "protect"`.
+- `TestOpenAPISpecServed` catches `openapi.yaml` edits that break the YAML→JSON conversion.
+- Query performance: throwaway `postgres:16-alpine` container, apply `migrations/`, generate 10k artifacts / 270k versions / 1M files with `generate_series`, then `PREPARE` the generated SQL from `internal/db/sqlc/*.go` and `EXPLAIN ANALYZE EXECUTE` it.
 
 ## Local Minikube Deployment
 
@@ -260,10 +266,10 @@ Reference implementations: `../fusion-forge/internal/api/middleware/logging.go`,
 
 ## Changelog
 Every feature addition and bugfix must be reflected in `CHANGELOG.md` before the work is considered done. Follow the existing format: add an entry under `## [Unreleased]` or create a new `## [x.y.z] — YYYY-MM-DD` section.
-- **README.md/API_ARCHITECTURE.md/EXAMPLES.md drift silently:** unlike `openapi.yaml` (embedded + served, effectively self-checking), these are hand-maintained prose with nothing enforcing sync. The Types and Admin APIs shipped fully coded and in `openapi.yaml` but went undocumented in all three — and in this file's own REST API table above — for months. When adding an endpoint, grep all four for existing resource names before calling the work done.
+- **README.md/API_ARCHITECTURE.md/EXAMPLES.md drift silently:** unlike `openapi.yaml` (embedded + served, effectively self-checking), these are hand-maintained prose with nothing enforcing sync. The Types and Admin APIs shipped fully coded and in `openapi.yaml` but went undocumented in all three — and in this file's own REST API table above — for months. When adding an endpoint, grep all four for existing resource names before calling the work done. `MetricsSnapshot` in `openapi.yaml` must mirror the fields of `metrics.Snapshot` (`internal/metrics/cache.go`).
 
 ## Branch Strategy
-Commit directly to `main` and push it to `origin` — no `develop` or feature branches.
+Commit directly to `main` and push it to `origin` — no `develop` or feature branches. Remotes: `origin` = GitHub (`git@work:chrisfusion/fusion-index.git`), `gitea` = in-cluster mirror (`gitea.fusion.local`), not pushed unless asked.
 
 ## Commit Style
 Conventional Commits: `feat:`, `fix:`, `chore:`, `refactor:`
