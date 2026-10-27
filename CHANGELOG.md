@@ -12,6 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - **No Alpine anymore:** build stage `golang:1.25-trixie`, runtime distroless `gcr.io/distroless/base-debian13:nonroot` (no shell, no package manager; 94 MB), running as UID/GID 65532 — `backend.podSecurityContext` now defaults to those IDs plus `fsGroup: 65532`; a PVC holding files written by the old root image needs a chown or reset. `pg_dump`/`psql` 18 are copied with their shared libraries from the official `postgres:18-trixie` image (`PG_MAJOR` build arg) instead of `apk add postgresql16-client`
+- **Postgres hook Jobs (`createDatabaseJob`) use `postgres:18-trixie` (Debian) instead of `postgres:16-alpine`**, running as UID 999 (the Debian image's `postgres` user) instead of 70 — no Alpine images anymore. Verified with dash as `/bin/sh` under `readOnlyRootFilesystem`
 
 ### Fixed
 - **`backup-db` against Postgres 18:** pg_dump 16 aborted with "server version mismatch" against the Bitnami `postgresql:latest` (18) server
